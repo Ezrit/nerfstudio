@@ -315,32 +315,24 @@ class Cameras:
                 dim=-1,
             )
         elif self.camera_type[0] == CameraType.PANORAMA.value:
-            # getting spherical image coordinates in ( [-PI, PI), [-PI/2, PI/2) )
-            u = coord_stack[..., 0] * torch.pi
-            v = coord_stack[..., 1] * torch.pi
+            # NOTE: cy should be 1/2 of height... otherwise it aint really shooting the rays correctly
+            # NOTE: Actually I think it should tilt the sphere, but instead some pixel's rays at the top/bottom are overlapping
+
+            # TODO: Correctly tilt the sphere rays according to cy -> this would need to also change how theta is handled... *_*
+            # TODO: Think whether that even makes any sense... It doesnt really change anything and could easily be accomplished by rotating the camera instead
+            # TODO: In case it doesnt make any sense -> make the calculations independent from cy (and then prolly from cx as well)
+
+            # getting spherical image coordinates in (theta, phi) \in ( [-PI, PI), [-PI/2, PI/2) )
+            theta = coord_stack[..., 0] * torch.pi
+            phi = coord_stack[..., 1] * torch.pi
 
             # convert spherical coordinates to viewing direction for each pixel in camera coordinates
-            xx = torch.cos(v) * torch.sin(u)
-            yy = torch.sin(v)
-            zz = torch.cos(v) * torch.cos(u)
+            xx = torch.cos(phi) * torch.sin(theta)
+            yy = torch.sin(phi)
+            zz = torch.cos(phi) * torch.cos(theta)
             directions_stack = torch.stack([xx, yy, zz], dim=-1)
             del xx, yy, zz
 
-            # # getting spherical image coordinates in ( [0, 2PI), [0, PI) )
-            # u = x / self.image_width * 2 * torch.pi
-            # u_offset_x = (x+1) / self.image_width * 2 * torch.pi
-            # u = torch.stack([u, u_offset_x, u])
-            # v = y / self.image_height * 1 * torch.pi
-            # v_offset_y = (y+1) / self.image_height * 1 * torch.pi
-            # v = torch.stack([v, v, v_offset_y])
-
-            # # convert spherical coordinates to viewing direction for each pixel in camera coordinates
-            # xx = torch.sin(v) * -torch.sin(u)
-            # yy = -torch.cos(v)
-            # zz = torch.sin(v) * -torch.cos(u)
-            # print(xx.shape)
-            # directions_stack = torch.stack([xx, yy, zz], dim=-1)  # OpenCV convention
-            # del xx, yy, zz
         else:
             raise ValueError(f"Camera type {CameraType(self.camera_type[0])} not supported.")
 
