@@ -58,19 +58,22 @@ class StellaVSlam(DataParser):
                     continue
                 image_id, qw, qx, qy, qz, tx, ty, tz, cam_id, img_name = line.split()
 
-                trans_cw = np.array([float(tx), float(ty), float(tz)], dtype=np.float32)
                 rotationQuat_w2c = Quaternion(float(qw), float(qx), float(qy), float(qz))
 
                 rotationQuat_c2w = rotationQuat_w2c.inverse
                 rot_matrix_c2w = rotationQuat_c2w.rotation_matrix
-                rot_matrix_c2w = rotationQuat_w2c.rotation_matrix.T
+                # negate to adapt the coordinate system??
+                rot_matrix_c2w = -rotationQuat_w2c.rotation_matrix.T
+
+                # negate to adapt the coordinate system??
+                trans_cw = -np.array([float(tx), float(ty), float(tz)], dtype=np.float32)
 
                 pos = -rot_matrix_c2w @ trans_cw
 
                 pos = np.expand_dims(pos, axis=1)
 
                 # TODO: unsure why this is... but otherwise it is the wrong direction. I think it ist because of the y/z axis exchange...
-                pos[1] = -pos[1]
+                # pos[1] = -pos[1]
 
                 img_filenames.append(self.config.data / 'images' / img_name)
                 pose = np.append(rot_matrix_c2w, pos, axis=1).astype(np.float32)
