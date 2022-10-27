@@ -322,15 +322,15 @@ class Cameras:
             # TODO: Think whether that even makes any sense... It doesnt really change anything and could easily be accomplished by rotating the camera instead
             # TODO: In case it doesnt make any sense -> make the calculations independent from cy (and then prolly from cx as well)
 
-            # getting spherical image coordinates in (theta, phi) \in ( [-PI, PI), [-PI/2, PI/2) )
+            # getting spherical image coordinates in (theta, phi) \in ( [-PI, PI), [+PI/2, -PI/2) )
             theta = coord_stack[..., 0] * torch.pi
             phi = coord_stack[..., 1] * torch.pi
 
             # convert spherical coordinates to viewing direction for each pixel in camera coordinates
             xx = torch.cos(phi) * torch.sin(theta)
-            yy = -torch.sin(phi)
+            yy = torch.sin(phi)
             zz = torch.cos(phi) * torch.cos(theta)
-            directions_stack = -torch.stack([xx, yy, zz], dim=-1)
+            directions_stack = torch.stack([xx, yy, zz], dim=-1)
             del xx, yy, zz
 
         else:

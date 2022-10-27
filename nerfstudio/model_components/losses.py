@@ -22,10 +22,18 @@ from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RaySamples
 
+
+def weighted_mse_loss(input, target, weight, reduction='mean'):
+    if reduction == 'mean':
+        return torch.mean(weight * (input - target) ** 2)
+    return torch.sum(weight * (input - target) ** 2)
+
+
 L1Loss = nn.L1Loss
 MSELoss = nn.MSELoss
+MSEWLoss = weighted_mse_loss
 
-LOSSES = {"L1": L1Loss, "MSE": MSELoss}
+LOSSES = {"L1": L1Loss, "MSE": MSELoss, 'MSEW': MSEWLoss}
 
 EPS = 1.0e-7
 

@@ -1,13 +1,30 @@
+# Copyright 2022 The Nerfstudio Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Data parser for stella vslam data"""
 
 from __future__ import annotations
 
+from cmath import pi
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
-from typing import Literal, Type
+from typing import List, Literal, Type
 
 import numpy as np
 import torch
+from PIL import Image
 from pyquaternion import Quaternion
 from rich.console import Console
 
@@ -25,6 +42,72 @@ CONSOLE = Console(width=120)
 MAX_AUTO_RESOLUTION = 1600
 
 
+class WeightingType(Enum):
+    """Supported Weighting types."""
+
+    ALPHA = auto()
+    POLAR = auto()
+    ALPHA_POLAR = auto()
+    UNIFORM = auto()
+
+
+CAMERA_MODEL_TO_TYPE = {
+    "ALPHA": WeightingType.ALPHA,
+    "POLAR": WeightingType.POLAR,
+    "ALPHA_POLAR": WeightingType.ALPHA_POLAR,
+    "UNIFORM": WeightingType.UNIFORM,
+}
+
+
+def get_weights_and_masks(image_idx: int, alpha_threshold: float, weighting_type: WeightingType, filenames: List[Path]):
+    """function to process additional weighting and mask information
+
+    Args:
+        image_idx: specific image index to work with
+        alpha_threshold: masking threshold, every pixel with alpha lower than this will be masked
+        weighting_type: weigthing type for images
+        filenames: List of all filenames, to read the image again... :/
+    """
+    # nothing to do if threshold is 0 or less and weighting type is uniform -> dont read the image again! 
+    if alpha_threshold <= 0.0 and weighting_type == WeightingType.UNIFORM.value:
+        return
+
+    # read the image... once again... not ideal
+    # TODO: think whether/how to improve this. This was read in datasets.py already once.
+    #       ofc I could add this functionality in datasets.py, but it seems to break the idea behind the structure
+    image_filename = filenames[image_idx]
+    pil_image = Image.open(image_filename)
+    image = np.array(pil_image, dtype="uint8")  # shape is (h, w, 3 or 4)
+    assert len(image.shape) == 3
+    assert image.dtype == np.uint8
+    assert image.shape[2] in [3, 4], f"Image shape of {image.shape} is in correct."
+    image = torch.from_numpy(image.astype("float32") / 255.0)
+
+    # get alpha values or ones if no alpha channel is present
+    if image.shape[-1] == 4:
+        alpha = image[:, :, 3:]
+    else:
+        alpha = torch.ones_like(image[:, :, 0:1])
+
+    additional_data = {}
+    # add "mask" to data and mask all pixels with alpha < threshold
+    if alpha_threshold > 0.0:
+        mask = torch.ones_like(alpha)
+        mask[alpha < alpha_threshold] = 0
+        additional_data["mask"] = mask
+    
+    # add "weight" to data for weighted MSE Loss depending on weighting type selected
+    if weighting_type == WeightingType.ALPHA.value:
+        additional_data["weight"] = alpha
+    elif weighting_type == WeightingType.POLAR.value:
+        weights = torch.sin(torch.arange(alpha.shape[0], dtype=torch.float32).view(-1, 1, 1) / alpha.shape[0] * pi)
+        additional_data["weights"] = weights.repeat(1, alpha.shape[1], 1)
+    elif weighting_type == WeightingType.ALPHA_POLAR.value:
+        weights = torch.sin(torch.arange(alpha.shape[0], dtype=torch.float32).view(-1, 1, 1) / alpha.shape[0] * pi)
+        additional_data["weights"] = weights.repeat(1, alpha.shape[1], 1) * alpha
+    return additional_data
+
+
 @dataclass
 class StellaVSlamDataParserConfig(DataParserConfig):
     """StellaVSlam dataset config"""
@@ -39,6 +122,10 @@ class StellaVSlamDataParserConfig(DataParserConfig):
     """How much to scale the scene."""
     orientation_method: Literal["pca", "up"] = "up"
     """The method to use for orientation."""
+    weighting: WeightingType = CAMERA_MODEL_TO_TYPE["POLAR"]
+    """Weighting for the MSE Loss for the images"""
+    alpha_threshold: float = 0.6
+    """Threshold for alpha masking. Alpha values below this will be masked completely (No rays cast)."""
 
 
 @dataclass
@@ -60,24 +147,18 @@ class StellaVSlam(DataParser):
 
                 rotationQuat_w2c = Quaternion(float(qw), float(qx), float(qy), float(qz))
 
-                rotationQuat_c2w = rotationQuat_w2c.inverse
-                rot_matrix_c2w = rotationQuat_c2w.rotation_matrix
-                # negate to adapt the coordinate system??
-                rot_matrix_c2w = -rotationQuat_w2c.rotation_matrix.T
+                change_axis = np.array([[0, 0, -1], [0, -1, 0], [-1, 0, 0]])
+                rot_matrix_c2w = rotationQuat_w2c.rotation_matrix.T
 
-                # negate to adapt the coordinate system??
-                trans_cw = -np.array([float(tx), float(ty), float(tz)], dtype=np.float32)
+                trans_cw = np.array([float(tx), -float(ty), float(tz)], dtype=np.float32)
 
                 pos = -rot_matrix_c2w @ trans_cw
 
                 pos = np.expand_dims(pos, axis=1)
 
-                # TODO: unsure why this is... but otherwise it is the wrong direction. I think it ist because of the y/z axis exchange...
-                # pos[1] = -pos[1]
-
                 img_filenames.append(self.config.data / 'images' / img_name)
                 pose = np.append(rot_matrix_c2w, pos, axis=1).astype(np.float32)
-                pose = np.append(pose, np.array([[0, 0, 0, 1]], dtype=np.float32), axis=0)
+                pose = np.append(change_axis @ pose, np.array([[0, 0, 0, 1]], dtype=np.float32), axis=0)
                 poses.append(pose)
 
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
@@ -128,12 +209,16 @@ class StellaVSlam(DataParser):
             camera_type=CameraType.PANORAMA,
         )
 
-        alpha_color_tensor = get_color("white")
+        alpha_color_tensor = get_color("green")
+
+        add_inputs = {}
+        add_inputs["weights_and_mask"] = {"func": get_weights_and_masks, "kwargs": {"alpha_threshold": self.config.alpha_threshold, "weighting_type": self.config.weighting, "filenames": img_filenames}}
 
         dataparser_outputs = DataparserOutputs(
             image_filenames=img_filenames,
             cameras=cameras,
             scene_box=scene_box,
             alpha_color=alpha_color_tensor,
+            additional_inputs=add_inputs
         )
         return dataparser_outputs

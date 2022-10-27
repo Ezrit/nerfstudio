@@ -49,13 +49,15 @@ def collate_image_dataset_batch(batch: Dict, num_rays_per_batch: int, keep_full_
 
     c, y, x = (i.flatten() for i in torch.split(indices, 1, dim=-1))
     image = batch["image"][c, y, x]
-    mask, semantics_stuff, semantics_thing = None, None, None
+    weight, mask, semantics_stuff, semantics_thing = None, None, None, None
     if "mask" in batch:
         mask = batch["mask"][c, y, x]
     if "semantics_stuff" in batch:
         semantics_stuff = batch["semantics_stuff"][c, y, x]
     if "semantics_thing" in batch:
         semantics_thing = batch["semantics_thing"][c, y, x]
+    if "weight" in batch:
+        weight = batch["weight"][c, y, x]
     assert image.shape == (num_rays_per_batch, 3), image.shape
 
     # Needed to correct the random indices to their actual camera idx locations.
@@ -72,6 +74,8 @@ def collate_image_dataset_batch(batch: Dict, num_rays_per_batch: int, keep_full_
         collated_batch["semantics_stuff"] = semantics_stuff
     if semantics_thing is not None:
         collated_batch["semantics_thing"] = semantics_thing
+    if weight is not None:
+        collated_batch["weight"] = weight
 
     if keep_full_image:
         collated_batch["full_image"] = batch["image"]

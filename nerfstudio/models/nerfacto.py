@@ -38,7 +38,12 @@ from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.fields.nerfacto_field import TCNNNerfactoField
-from nerfstudio.model_components.losses import MSELoss, distortion_loss, interlevel_loss
+from nerfstudio.model_components.losses import (
+    MSELoss,
+    MSEWLoss,
+    distortion_loss,
+    interlevel_loss,
+)
 from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
@@ -164,6 +169,7 @@ class NerfactoModel(Model):
 
         # losses
         self.rgb_loss = MSELoss()
+        self.rgbw_loss = MSEWLoss
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
@@ -241,7 +247,9 @@ class NerfactoModel(Model):
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = {}
         image = batch["image"].to(self.device)
-        loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
+        # loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
+        weight = batch["weight"].to(self.device) if "weight" in batch else torch.ones_like(image)
+        loss_dict["rgbw_loss"] = self.rgbw_loss(image, outputs["rgb"], weight)
         if self.training:
             loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
                 outputs["weights_list"], outputs["ray_samples_list"]
