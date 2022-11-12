@@ -36,8 +36,18 @@ def collate_image_dataset_batch(batch: Dict, num_rays_per_batch: int, keep_full_
     device = batch["image"].device
     num_images, image_height, image_width, _ = batch["image"].shape
 
+    # sample according to the given probabilities if probabilities are in the batch
+    if "probability" in batch:
+        mask = batch["mask"][..., 0] if "mask" in batch else torch.ones_like(batch["image"][..., 0])
+        probability = batch["probability"][..., 0]
+        nonzero_indices = torch.nonzero(mask, as_tuple=False)
+        masked_probability = probability[nonzero_indices.chunk(chunks=3, dim=1)]
+
+        # TODO: think about a workaround... as the number of categories (masked_probabilitz[:, 0] cannot exceed 2^24)
+        chosen_indices = torch.multinomial(masked_probability[:, 0], num_samples=num_rays_per_batch, replacement=False)
+        indices = nonzero_indices[chosen_indices]
     # only sample within the mask, if the mask is in the batch
-    if "mask" in batch:
+    elif "mask" in batch:
         nonzero_indices = torch.nonzero(batch["mask"][..., 0], as_tuple=False)
         chosen_indices = random.sample(range(len(nonzero_indices)), k=num_rays_per_batch)
         indices = nonzero_indices[chosen_indices]
