@@ -69,7 +69,7 @@ def get_weights_and_masks(image_idx: int, alpha_threshold: float, weighting_type
         filenames: List of all filenames, to read the image again... :/
     """
     # nothing to do if threshold is 0 or less and weighting type is uniform -> dont read the image again! 
-    if alpha_threshold <= 0.0 and weighting_type == WeightingType.UNIFORM.value:
+    if alpha_threshold <= 0.0 and weighting_type == WeightingType.UNIFORM:
         return
 
     # read the image... once again... not ideal
@@ -95,16 +95,19 @@ def get_weights_and_masks(image_idx: int, alpha_threshold: float, weighting_type
         mask = torch.ones_like(alpha)
         mask[alpha < alpha_threshold] = 0
         additional_data["mask"] = mask
-    
+
     # add "weight" to data for weighted MSE Loss depending on weighting type selected
-    if weighting_type == WeightingType.ALPHA.value:
+    if weighting_type == WeightingType.ALPHA:
         additional_data["weight"] = alpha
-    elif weighting_type == WeightingType.POLAR.value:
-        weights = torch.sin(torch.arange(alpha.shape[0], dtype=torch.float32).view(-1, 1, 1) / alpha.shape[0] * pi)
-        additional_data["weights"] = weights.repeat(1, alpha.shape[1], 1)
-    elif weighting_type == WeightingType.ALPHA_POLAR.value:
-        weights = torch.sin(torch.arange(alpha.shape[0], dtype=torch.float32).view(-1, 1, 1) / alpha.shape[0] * pi)
-        additional_data["weights"] = weights.repeat(1, alpha.shape[1], 1) * alpha
+        # additional_data["probability"] = alpha
+    elif weighting_type == WeightingType.POLAR:
+        weights = torch.sin((torch.arange(alpha.shape[0], dtype=torch.float32).view(-1, 1, 1) + 0.5) / alpha.shape[0] * pi)
+        additional_data["weight"] = weights.repeat(1, alpha.shape[1], 1)
+        # additional_data["probability"] = weights.repeat(1, alpha.shape[1], 1)
+    elif weighting_type == WeightingType.ALPHA_POLAR:
+        weights = torch.sin((torch.arange(alpha.shape[0], dtype=torch.float32).view(-1, 1, 1) + 0.5) / alpha.shape[0] * pi)
+        additional_data["weight"] = weights.repeat(1, alpha.shape[1], 1) * alpha
+        # additional_data["probability"] = weights.repeat(1, alpha.shape[1], 1) * alpha
     return additional_data
 
 
