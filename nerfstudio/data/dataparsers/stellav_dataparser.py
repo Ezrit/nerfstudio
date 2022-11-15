@@ -121,7 +121,7 @@ class StellaVSlamDataParserConfig(DataParserConfig):
     """Directory specifying location of data."""
     scale_factor: float = 1.0
     """How much to scale the camera origins by."""
-    scene_scale: float = 0.33
+    scene_scale: float = 1.0
     """How much to scale the scene."""
     orientation_method: Literal["pca", "up"] = "up"
     """The method to use for orientation."""
