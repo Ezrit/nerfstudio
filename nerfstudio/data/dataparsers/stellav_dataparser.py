@@ -136,6 +136,7 @@ class StellaVSlam(DataParser):
     """Stella VSlam DatasetParser"""
 
     config: StellaVSlamDataParserConfig
+    transform: torch.Tensor = torch.eye(4)
 
     def _generate_dataparser_outputs(self, split="train"):
         img_filenames = []
@@ -150,10 +151,10 @@ class StellaVSlam(DataParser):
 
                 rotationQuat_w2c = Quaternion(float(qw), float(qx), float(qy), float(qz))
 
-                change_axis = np.array([[0, 0, -1], [0, -1, 0], [-1, 0, 0]])
+                change_axis = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
                 rot_matrix_c2w = rotationQuat_w2c.rotation_matrix.T
 
-                trans_cw = np.array([float(tx), -float(ty), float(tz)], dtype=np.float32)
+                trans_cw = np.array([float(tx), float(ty), float(tz)], dtype=np.float32)
 
                 pos = -rot_matrix_c2w @ trans_cw
 
@@ -165,11 +166,15 @@ class StellaVSlam(DataParser):
                 poses.append(pose)
 
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
+        self.transform = camera_utils.auto_orient_poses_transform(poses, method=self.config.orientation_method)
         poses = camera_utils.auto_orient_poses(poses, method=self.config.orientation_method)
 
         # Scale poses
         scale_factor = 1.0 / torch.max(torch.abs(poses[:, :3, 3]))
         poses[:, :3, 3] *= scale_factor * self.config.scale_factor
+
+        combined_scale_factor = scale_factor * self.config.scale_factor
+        self.transform = torch.diag(torch.tensor([combined_scale_factor, combined_scale_factor, combined_scale_factor, 1], device=self.transform.device)) @ self.transform
 
         # in x,y,z order
         # assumes that the scene is centered at the origin
