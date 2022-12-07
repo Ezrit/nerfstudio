@@ -119,6 +119,8 @@ class StellaVSlamDataParserConfig(DataParserConfig):
     """target class to instantiate"""
     data: Path = Path("data/stellaV/aist_store_1")
     """Directory specifying location of data."""
+    direction: int = -1
+    """specifies the direction to train. (-1 means there is none, 0 means all at once, others are the specified direction only"""
     scale_factor: float = 1.0
     """How much to scale the camera origins by."""
     scene_scale: float = 1.0
@@ -136,7 +138,6 @@ class StellaVSlam(DataParser):
     """Stella VSlam DatasetParser"""
 
     config: StellaVSlamDataParserConfig
-    transform: torch.Tensor = torch.eye(4)
 
     def _generate_dataparser_outputs(self, split="train"):
         img_filenames = []
@@ -151,7 +152,7 @@ class StellaVSlam(DataParser):
 
                 rotationQuat_w2c = Quaternion(float(qw), float(qx), float(qy), float(qz))
 
-                change_axis = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
+                change_axis = np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]])
                 rot_matrix_c2w = rotationQuat_w2c.rotation_matrix.T
 
                 trans_cw = np.array([float(tx), float(ty), float(tz)], dtype=np.float32)
@@ -160,7 +161,15 @@ class StellaVSlam(DataParser):
 
                 pos = np.expand_dims(pos, axis=1)
 
-                img_filenames.append(self.config.data / 'images' / img_name)
+                if self.config.direction < 0:
+                    img_filenames.append(self.config.data / 'images' / img_name)
+                elif self.config.direction == 0:
+                    img_filenames.append(self.config.data / 'Direction_{0}'.format(cam_id) / 'images' / img_name)
+                else:
+                    if self.config.direction != int(cam_id):
+                        continue
+                    img_filenames.append(self.config.data / 'Direction_{0}'.format(cam_id) / 'images' / img_name)
+
                 pose = np.append(rot_matrix_c2w, pos, axis=1).astype(np.float32)
                 pose = np.append(change_axis @ pose, np.array([[0, 0, 0, 1]], dtype=np.float32), axis=0)
                 poses.append(pose)

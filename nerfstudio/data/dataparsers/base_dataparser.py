@@ -95,6 +95,7 @@ class DataParser:
     """
 
     config: DataParserConfig
+    transform: torch.Tensor = torch.eye(4)
 
     def __init__(self, config: DataParserConfig):
         super().__init__()
