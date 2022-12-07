@@ -159,7 +159,7 @@ class DualRenderTrajectory:
 
         # load sub config & pipeline
         sub_config, sub_pipeline, _ = eval_setup(
-            self.main_load_config,
+            self.sub_load_config,
             eval_num_rays_per_chunk=self.eval_num_rays_per_chunk,
         )
         sub_dataparser = sub_config.pipeline.datamanager.dataparser.setup()
