@@ -36,6 +36,7 @@ from nerfstudio.data.dataparsers.friends_dataparser import FriendsDataParserConf
 from nerfstudio.data.dataparsers.instant_ngp_dataparser import (
     InstantNGPDataParserConfig,
 )
+from nerfstudio.data.dataparsers.metashape_dataparser import MetashapeDataParserConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
 from nerfstudio.data.dataparsers.record3d_dataparser import Record3DDataParserConfig
 from nerfstudio.data.dataparsers.stellav_dataparser import StellaVSlamDataParserConfig
@@ -59,6 +60,7 @@ AnnotatedDataParserUnion = tyro.conf.OmitSubcommandPrefixes[  # Omit prefixes of
             "instant-ngp-data": InstantNGPDataParserConfig(),
             "record3d-data": Record3DDataParserConfig(),
             "stellav-data": StellaVSlamDataParserConfig(),
+            "metashape-data": MetashapeDataParserConfig(),
         },
         prefix_names=False,  # Omit prefixes in subcommands themselves.
     )
