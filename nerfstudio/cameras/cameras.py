@@ -329,7 +329,7 @@ class Cameras:
             # convert spherical coordinates to viewing direction for each pixel in camera coordinates
             xx = torch.cos(phi) * torch.sin(theta)
             yy = torch.sin(phi)
-            zz = torch.cos(phi) * torch.cos(theta)
+            zz = -torch.cos(phi) * torch.cos(theta)
             directions_stack = torch.stack([xx, yy, zz], dim=-1)
             del xx, yy, zz
 

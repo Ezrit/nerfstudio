@@ -142,6 +142,8 @@ class Metashape(DataParser):
         sub_folder = ''
 
         change_axis = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+        change_axis_rot = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+        change_axis_pos = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
 
         # TODO: care for None in case there is no chunk etc.... but actually the data should be just like that...
         tree = ET.parse(self.config.data / 'cameras.xml')
@@ -165,6 +167,8 @@ class Metashape(DataParser):
                     img_filenames.append(group_folder / file_name)
                     msk_filenames.append(group_mask_folder / file_name)
                     pose = np.array([float(i) for i in camera.find('transform').text.split(' ')], dtype=np.float32).reshape((4,4))
+                    pose[:3, :3] = (change_axis_rot[:3, :3] @ pose[:3, :3].transpose()).transpose()
+                    pose[:, 3] = change_axis_pos @ pose[:, 3]
                     poses.append(change_axis @ pose)
         else:
             group_folder: Path = self.config.data / sub_folder / 'images' / split
@@ -177,6 +181,8 @@ class Metashape(DataParser):
                 img_filenames.append(group_folder / file_name)
                 msk_filenames.append(group_mask_folder / file_name)
                 pose = np.array([float(i) for i in camera.find('transform').text.split(' ')], dtype=np.float32).reshape((4,4))
+                pose[:3, :3] = (change_axis_rot[:3, :3] @ pose[:3, :3].transpose()).transpose()
+                pose[:, 3] = change_axis_pos @ pose[:, 3]
                 poses.append(change_axis @ pose)
 
         sampled_indices = range(len(img_filenames))
@@ -185,15 +191,13 @@ class Metashape(DataParser):
             sampled_indices = random.sample(indices, self.config.max_images)
             img_filenames = [img_filenames[i] for i in sampled_indices]
             msk_filenames = [msk_filenames[i] for i in sampled_indices]
-            #poses = [poses[i] for i in sampled_indices]
+            # poses = [poses[i] for i in sampled_indices] this needs to be done after auto_orient_poses, so the final world coordinate system doesnt change every time
             
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
         self.transform = camera_utils.auto_orient_poses_transform(poses, method=self.config.orientation_method)
-        #poses = camera_utils.auto_orient_poses(poses, method=self.config.orientation_method)
+        poses = camera_utils.auto_orient_poses(poses, method=self.config.orientation_method)
         poses = poses[sampled_indices, ...]
 
-        # TODO!!!!! Scaling and transformation of the scene is dependent on the randomly selected poses....
-        # BAD!
         # Scale poses
         scale_factor = 1.0 / torch.max(torch.abs(poses[:, :3, 3]))
         poses[:, :3, 3] *= scale_factor * self.config.scale_factor
