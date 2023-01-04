@@ -4,6 +4,7 @@ import pathlib
 import sys
 import typing
 import xml.etree.ElementTree as ET
+from typing import Callable
 
 import mediapy as media
 import numpy as np
@@ -82,10 +83,6 @@ def save_video(images: typing.List[np.ndarray], output_filename: pathlib.Path, s
     CONSOLE.print(f"[green]Saved video to {output_filename}", justify="center")
 
 
-def render_cameras() -> None:
-    pass
-
-
 def get_nerf_transform(load_config_path: pathlib.Path) -> typing.Tuple[Pipeline, torch.Tensor]:
     config, pipeline, _ = eval_setup(
         load_config_path,
@@ -98,40 +95,6 @@ def get_nerf_transform(load_config_path: pathlib.Path) -> typing.Tuple[Pipeline,
     transform = dataparser.transform
 
     return pipeline, transform
-
-
-def read_transforms(dataset_folder: pathlib.Path, start_direction: int, start_frame: int, target_direction: int, target_frame: int) -> typing.Tuple[np.ndarray, np.ndarray]:
-    tree = ET.parse(dataset_folder / 'cameras.xml')
-    root = tree.getroot()
-    chunk = root.find('chunk')
-    cameras = chunk.find('cameras')
-
-    start_transform: np.ndarray = np.array(())
-    target_transform: np.ndarray = np.array(())
-
-    change_axis_rot = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-    change_axis_pos = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
-
-    groups_exist = (cameras.find('group') is not None)
-    if groups_exist:
-        for group in cameras.findall('group'):
-            if int(group.get('id')) == start_direction:
-                for camera in group.findall('camera'):
-                    if int(camera.get('label')) == start_frame:
-                        start_transform = np.array([float(i) for i in camera.find('transform').text.split(' ')], dtype=np.float32).reshape((4,4))
-                        start_transform[:3, :3] = (change_axis_rot[:3, :3] @ start_transform[:3, :3].transpose()).transpose()
-                        start_transform[:, 3] = change_axis_pos @ start_transform[:, 3]
-                        break
-            if int(group.get('id')) == target_direction:
-                for camera in group.findall('camera'):
-                    if int(camera.get('label')) == start_frame:
-                        target_transform = np.array([float(i) for i in camera.find('transform').text.split(' ')], dtype=np.float32).reshape((4,4))
-                        target_transform[:3, :3] = (change_axis_rot[:3, :3] @ target_transform[:3, :3].transpose()).transpose()
-                        target_transform[:, 3] = change_axis_pos @ target_transform[:, 3]
-                        break
-    else:
-        return (np.array(()), np.array(()))
-    return (start_transform, target_transform)
 
 
 # return an numpy array with the interpolated transforms. For the interpolation a middle point is generated with start x and end z (or vice versa depending on direction).
@@ -169,35 +132,6 @@ def get_interpolation_transforms(start_transform: torch.Tensor, end_transform: t
     return camera_to_worlds
 
 
-def read_transforms_from_xml(xml_file: pathlib.Path, direction_group: int, frame_numbers: typing.Tuple[int, int]) -> typing.Dict[int, np.ndarray]:
-    transform_dict = {}
-
-    if frame_numbers[0] > frame_numbers[1]:
-        frame_numbers = (frame_numbers[1], frame_numbers[0])
-
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
-    chunk = root.find('chunk')
-    cameras = chunk.find('cameras')
-
-    change_axis_rot = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-    change_axis_pos = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
-
-    groups_exist = (cameras.find('group') is not None)
-    if groups_exist:
-        for group in cameras.findall('group'):
-            if int(group.get('id')) != direction_group:
-                continue
-            for camera in group.findall('camera'):
-                frame = int(camera.get('label'))
-                if frame >= frame_numbers[0] and frame < frame_numbers[1]:
-                    transform = np.array([float(i) for i in camera.find('transform').text.split(' ')], dtype=np.float32).reshape((4,4))
-                    transform[:3, :3] = (change_axis_rot[:3, :3] @ transform[:3, :3].transpose()).transpose()
-                    transform[:, 3] = change_axis_pos @ transform[:, 3]
-                    transform_dict[frame] = transform
-    return transform_dict
-
-
 def get_cameras(resolution: typing.Tuple[int, int], camera_to_worlds: torch.Tensor) -> Cameras:
     return Cameras(
         fx=resolution[1] / 2,
@@ -211,13 +145,109 @@ def get_cameras(resolution: typing.Tuple[int, int], camera_to_worlds: torch.Tens
     )
 
 
-def dict_to_tensor(array_dict: typing.Dict[int, np.ndarray], dict_key_range: typing.Tuple[int, int]) -> torch.Tensor:
+def dict_to_tensor(array_dict: typing.Union[typing.Dict[typing.Any, np.ndarray], typing.Dict[typing.Any, torch.Tensor]]) -> torch.Tensor:
     array_list: typing.List[np.ndarray] = []
 
-    for i in range(dict_key_range[0], dict_key_range[1]):
-        array_list.append(array_dict[i])
+    for key in sorted(array_dict):
+        array_list.append(np.array(array_dict[key]))
 
     return torch.from_numpy(np.array(array_list).astype(np.float32))
+
+
+class XMLCameraHandler:
+
+    change_axis_rot: np.ndarray = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+    change_axis_pos: np.ndarray = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+
+    def __init__(self, xml_path: pathlib.Path):
+        self.xml_file: pathlib.Path = xml_path
+        self.tree: ET.ElementTree = ET.parse(self.xml_file)
+        self.current_element: ET.Element = self.tree.getroot()
+
+    def resetElement(self) -> None:
+        self.current_element = self.tree.getroot()
+
+    def getElement(self, *sub_elements: typing.Union[str, typing.Tuple[str, Callable[[ET.Element], bool]]]) -> typing.Optional[ET.Element]:
+        search_element: ET.Element = self.current_element
+
+        for sub_element in sub_elements:
+            found_result = None
+
+            if isinstance(sub_element, str):
+                found_result = search_element.find(sub_element)
+            else:
+                for result in search_element.findall(sub_element[0]):
+                    if sub_element[1](result):
+                        found_result = result
+                        break
+
+            if found_result is None:
+                return None
+            search_element = found_result
+
+        return search_element
+
+    def setElement(self, *sub_elements: typing.Union[str, typing.Tuple[str, Callable[[ET.Element], bool]]]) -> bool:
+        found_element = self.getElement(*sub_elements)
+        if found_element is None:
+            return False
+        self.current_element = found_element
+        return True
+
+    @staticmethod
+    def adaptTransform(transform: np.ndarray) -> np.ndarray:
+        transform[:3, :3] = (XMLCameraHandler.change_axis_rot[:3, :3] @ transform[:3, :3].transpose()).transpose()
+        transform[:, 3] = XMLCameraHandler.change_axis_pos @ transform[:, 3]
+        return transform
+
+    def getTransforms(self,
+                      masking_function: Callable[[ET.Element], bool],
+                      *sub_elements: typing.Union[str, typing.Tuple[str, Callable[[ET.Element], bool]]]
+                      ) -> typing.Optional[torch.Tensor]:
+        search_element = self.getElement(*sub_elements)
+        if search_element is None:
+            return None
+
+        picked_transforms = []
+        for camera in search_element.findall('camera'):
+            if masking_function(camera):
+                transform = XMLCameraHandler.adaptTransform(np.array([float(i) for i in camera.find('transform').text.split(' ')], dtype=np.float32).reshape((4,4)))
+                picked_transforms.append(transform)
+
+        return torch.from_numpy(np.array(picked_transforms, dtype=np.float32))
+
+    def getTransformsDict(self,
+                          masking_function: Callable[[ET.Element], bool],
+                          dict_key_function: Callable[[ET.Element], typing.Any],
+                          *sub_elements: typing.Union[str, typing.Tuple[str, Callable[[ET.Element], bool]]]
+                          ) -> typing.Optional[typing.Dict[typing.Any, torch.Tensor]]:
+        search_element = self.getElement(*sub_elements)
+        if search_element is None:
+            return None
+
+        transforms_dict = {}
+        for camera in search_element.findall('camera'):
+            if masking_function(camera):
+                transform = XMLCameraHandler.adaptTransform(np.array([float(i) for i in camera.find('transform').text.split(' ')], dtype=np.float32).reshape((4,4)))
+                transforms_dict[dict_key_function(camera)] = torch.from_numpy(transform)
+
+        return transforms_dict
+
+
+def read_transforms_from_xml(xml_handler: XMLCameraHandler, direction_group: int, frame_numbers: typing.Tuple[int, int]) -> typing.Dict[int, torch.Tensor]:
+    stash_element = xml_handler.current_element
+    xml_handler.resetElement()
+
+    if frame_numbers[0] > frame_numbers[1]:
+        frame_numbers = (frame_numbers[1], frame_numbers[0])
+
+    xml_handler.setElement('chunk', 'cameras', ('group', lambda el: int(el.get('id')) == direction_group))
+
+    transform_dict = xml_handler.getTransformsDict(lambda el: int(el.get('label')) >= frame_numbers[0] and int(el.get('label')) < frame_numbers[1], lambda el: el.get('label'))
+    xml_handler.current_element = stash_element
+    if transform_dict is None:
+        return {}
+    return transform_dict
 
 
 @dataclasses.dataclass
@@ -254,12 +284,13 @@ if __name__ == '__main__':
 
     now = datetime.datetime.now()
 
+    xml_handler = XMLCameraHandler(args.dataset_folder / 'cameras.xml')
     # first get camera transforms in genreal 'world' coordinates (metashape coordinates)
-    start_transforms_dict: typing.Dict[int, np.ndarray] = read_transforms_from_xml(args.dataset_folder / 'cameras.xml', args.start_direction, args.start_transistion_frame_numbers)
-    target_transforms_dict: typing.Dict[int, np.ndarray] = read_transforms_from_xml(args.dataset_folder / 'cameras.xml', args.target_direction, args.target_transistion_frame_numbers)
+    start_transforms_dict: typing.Dict[int, torch.Tensor] = read_transforms_from_xml(xml_handler, args.start_direction, args.start_transistion_frame_numbers)
+    target_transforms_dict: typing.Dict[int, torch.Tensor] = read_transforms_from_xml(xml_handler, args.target_direction, args.target_transistion_frame_numbers)
 
-    start_transforms: torch.Tensor = dict_to_tensor(start_transforms_dict, args.start_transistion_frame_numbers)
-    target_transforms: torch.Tensor = dict_to_tensor(target_transforms_dict, args.target_transistion_frame_numbers)
+    start_transforms: torch.Tensor = dict_to_tensor(start_transforms_dict)
+    target_transforms: torch.Tensor = dict_to_tensor(target_transforms_dict)
     between_transforms: torch.Tensor = get_interpolation_transforms(start_transforms[-1, ...], target_transforms[0, ...], 500, args.interpolate_direction)
     print(start_transforms.shape, between_transforms.shape)
 
