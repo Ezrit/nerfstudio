@@ -1,6 +1,8 @@
 import dataclasses
 import datetime
+import os
 import pathlib
+import re
 import sys
 import typing
 import xml.etree.ElementTree as ET
@@ -13,6 +15,7 @@ import scipy.interpolate
 import scipy.spatial.transform
 import torch
 import tyro
+from PIL import Image
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -29,6 +32,75 @@ from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.rich_utils import ItersPerSecColumn
 
 CONSOLE = Console(width=120)
+
+
+def frame_list_interpolation(
+    frame_list_start: typing.List[np.ndarray],
+    frame_list_end: typing.List[np.ndarray],
+    multiplier_function: typing.Optional[Callable[[float], float]] = None
+) -> typing.List[np.ndarray]:
+    interpolated_frame_list: typing.List[np.ndarray] = []
+    length = float(min(len(frame_list_start), len(frame_list_end)))
+    for i, (start_frame, end_frame) in enumerate(zip(frame_list_start, frame_list_end)):
+        linear_multiplier: float = i / length
+        actual_multiplier: float = linear_multiplier if multiplier_function is None else multiplier_function(linear_multiplier)
+
+        interpolated_frame: np.ndarray = (1.0 - actual_multiplier) * start_frame + actual_multiplier * end_frame
+        interpolated_frame_list.append(interpolated_frame)
+    return interpolated_frame_list
+
+
+def get_transition_frames(
+    leading_frames: typing.List[np.ndarray],
+    leading_transistion_frames: typing.List[np.ndarray],
+    starting_transistion_frames: typing.List[np.ndarray],
+    starting_path_frames: typing.List[np.ndarray],
+    targeting_path_frames: typing.List[np.ndarray],
+    targeting_transistion_frames: typing.List[np.ndarray],
+    ending_transistion_frames: typing.List[np.ndarray],
+    ending_frames: typing.List[np.ndarray]
+) -> typing.List[np.ndarray]:
+    # start with leading frames
+    transitioned_frames: typing.List[np.ndarray] = leading_frames
+
+    # Transition from leading -> starting nerf
+    transitioned_frames.extend(frame_list_interpolation(leading_transistion_frames, starting_transistion_frames))
+
+    # Transition from starting nerf -> targeting nerf
+    transitioned_frames.extend(frame_list_interpolation(starting_path_frames, targeting_path_frames))
+
+    # Transition from targeting nerf -> ending
+    transitioned_frames.extend(frame_list_interpolation(targeting_transistion_frames, ending_transistion_frames))
+
+    # end with ending frames
+    transitioned_frames.extend(ending_frames)
+    return transitioned_frames
+
+
+def extract_number(f: str) -> typing.Tuple[int, str]:
+    s = re.findall(r'(\d+).png', f)
+    return (int(s[0]) if s else -1, f)
+
+
+def get_data_frames(
+    image_folder: pathlib.Path,
+    frame_range: typing.Tuple[int, int],
+    resolution: typing.Tuple[int, int]
+) -> typing.List[np.ndarray]:
+    frames: typing.List[np.ndarray] = []
+
+    if frame_range[1] < 0:
+        list_of_files: typing.List[str] = os.listdir(image_folder)
+        max_number_file: str = max(list_of_files, key=extract_number)
+        frame_range = (frame_range[0], extract_number(max_number_file)[0])
+
+    for frame_number in range(frame_range[0], frame_range[1]):
+        frame = Image.open(image_folder / '{number:06d}.png'.format(number=frame_number))
+        np_frame = np.asarray(frame.resize((resolution[1], resolution[0]), Image.Resampling.LANCZOS)).astype(np.float32)
+        np_frame = np_frame / 255.0
+        frames.append(np_frame)
+
+    return frames
 
 
 def render_trajectory_frames(
@@ -73,7 +145,11 @@ def render_trajectory_frames(
     return images
 
 
-def save_video(images: typing.List[np.ndarray], output_filename: pathlib.Path, seconds: float = 10.0) -> None:
+def save_frames(iamges: typing.List[np.ndarray], output_folder) -> None:
+    pass
+
+
+def save_video(images: typing.List[np.ndarray], output_filename: pathlib.Path, seconds: float = 15.0) -> None:
     fps = len(images) / seconds
     # make the folder if it doesn't exist
     output_filename.parent.mkdir(parents=True, exist_ok=True)
@@ -125,7 +201,7 @@ def get_interpolation_transforms(start_transform: torch.Tensor, end_transform: t
     interpolated_rotations = slerp(interpolation_times).as_matrix()
     interpolated_transforms = np.append(interpolated_rotations, interpolated_positions.reshape(-1, 3, 1), axis=2)
 
-    append_bottom = np.array([0, 0, 0, 1], dtype=np.float32).reshape(1,1,4).repeat(num_interpolation, axis=0)
+    append_bottom = np.array([0, 0, 0, 1], dtype=np.float32).reshape(1, 1, 4).repeat(num_interpolation, axis=0)
 
     camera_to_worlds = torch.from_numpy(np.append(interpolated_transforms, append_bottom, axis=1).astype(np.float32))
 
@@ -186,6 +262,21 @@ class XMLCameraHandler:
             search_element = found_result
 
         return search_element
+
+    def getGroupImagesPath(self, group_id: int = -1) -> pathlib.Path:
+        current_element = self.current_element
+        self.resetElement()
+
+        # sub_elements = ['chunk', 'cameras', ]
+        group_element = self.getElement('chunk', 'cameras', ('group', lambda el: int(el.get('id')) == group_id))
+        if group_element is None:
+            return pathlib.Path()
+        self.current_element = current_element
+
+        group_name = group_element.get('label')
+        if group_name is None:
+            group_name = ''
+        return self.xml_file.parent / group_name / 'images'
 
     def setElement(self, *sub_elements: typing.Union[str, typing.Tuple[str, Callable[[ET.Element], bool]]]) -> bool:
         found_element = self.getElement(*sub_elements)
@@ -250,68 +341,142 @@ def read_transforms_from_xml(xml_handler: XMLCameraHandler, direction_group: int
     return transform_dict
 
 
+# TODO: use the currently unused config variables
 @dataclasses.dataclass
-class IntersectionTransitionArguments:
-    """Intersection Transition Arguments"""
+class PathInterpolationConfig:
+    """Config for the interpolation between the paths"""
 
-    dataset_folder: pathlib.Path
-    """Directory specifying location of data."""
-    start_load_config: pathlib.Path
-    """Path to config main YAML file - main refers to the NeRF in whichs coordinate system the path is given."""
-    target_load_config: pathlib.Path
-    """Path to second config YAML file."""
-    start_direction: int = 0
-    """specifies the starting direction for the transition video"""
-    start_transistion_frame_numbers: typing.Tuple[int, int] = (0, 100)
-    """specifies the frames of starting direction for the transition video. Hereby the weighting between original frames will decrease (to 0 by the second framenumber)"""
-    target_direction: int = 1
-    """specifies the target direction for the transition video"""
-    target_transistion_frame_numbers: typing.Tuple[int, int] = (100, 200)
-    """specifies the frames of target direction for the transition video. Hereby the weighting between original frames will increase (to 1 by the second framenumber)"""
+    position_interpolation_method: typing.Literal["spline"] = "spline"
+    """The method for pathing positions - TODO currently unused"""
+    orientation_interpolation_method: typing.Literal["slerp"] = "slerp"
+    """The method for pathing orientation - TODO currently unused"""
+    number_points: int = 500
+    """Number of points for the path interpolation"""
+
+
+@dataclasses.dataclass
+class DatasetTransitionGroupData:
+    """ """
+
+    nerf_config: pathlib.Path
+    """ """
+    group_id: int = 0
+    """ """
+    transition: typing.Tuple[int, int] = (0, 100)
+    """specifies the frames of this group for the transition video. Hereby the weighting between original frames will decrease (to 0 by the second framenumber)"""
+
+
+@dataclasses.dataclass
+class OutputConfig:
+    """ """
+
+    output_path: pathlib.Path = pathlib.Path('')
+    """Output directory"""
     camera_type: typing.Literal[CameraType.PERSPECTIVE, CameraType.PANORAMA] = CameraType.PANORAMA
     """Specifies camera type for output frames"""
-    output_folder: pathlib.Path = pathlib.Path('Transition')
-    """Output directory (relative to dataset_folder)"""
     image_resolution: typing.Tuple[int, int] = (600, 1200)
     """Resolution of output frames (height, width)"""
+    output_single_frames: bool = False
+    """Save the frames for the whole path from both dataset groups"""
+    output_single_video: bool = False
+    """Save the videos for the whole path from both dataset groups"""
+    output_combined_frames: bool = False
+    """Save the combined frames for the whole path"""
+    output_combined_video: bool = True
+    """Save the combined video for the whole path"""
+
+
+@dataclasses.dataclass
+class IntersectionTransition:
+    """Intersection Transition Arguments"""
+
+    data_folder: pathlib.Path
+    """Directory specifying location of data."""
+    starting_data: DatasetTransitionGroupData
+    targeting_data: DatasetTransitionGroupData
+    path_config: PathInterpolationConfig
+    output_config: OutputConfig
     interpolate_direction: int = 0
     """Determines the corner point for the inteprolation"""
 
+    def main(self) -> None:
+        now = datetime.datetime.now()
 
-# TODO: define an area where we interpolate between original frames and network generated frames
-if __name__ == '__main__':
-    args = tyro.cli(IntersectionTransitionArguments)
+        xml_handler = XMLCameraHandler(self.data_folder / 'cameras.xml')
+        # first get camera transforms in genreal 'world' coordinates (metashape coordinates)
+        start_transforms_dict: typing.Dict[int, torch.Tensor] = read_transforms_from_xml(xml_handler, self.starting_data.group_id, self.starting_data.transition)
+        target_transforms_dict: typing.Dict[int, torch.Tensor] = read_transforms_from_xml(xml_handler, self.targeting_data.group_id, self.targeting_data.transition)
 
-    now = datetime.datetime.now()
+        start_transforms: torch.Tensor = dict_to_tensor(start_transforms_dict)
+        target_transforms: torch.Tensor = dict_to_tensor(target_transforms_dict)
+        between_transforms: torch.Tensor = get_interpolation_transforms(start_transforms[-1, ...], target_transforms[0, ...], self.path_config.number_points, self.interpolate_direction)
 
-    xml_handler = XMLCameraHandler(args.dataset_folder / 'cameras.xml')
-    # first get camera transforms in genreal 'world' coordinates (metashape coordinates)
-    start_transforms_dict: typing.Dict[int, torch.Tensor] = read_transforms_from_xml(xml_handler, args.start_direction, args.start_transistion_frame_numbers)
-    target_transforms_dict: typing.Dict[int, torch.Tensor] = read_transforms_from_xml(xml_handler, args.target_direction, args.target_transistion_frame_numbers)
+        # get camera_to_worlds for the respective nerfs
+        start_nerf_pipeline, start_nerf_transform = get_nerf_transform(self.starting_data.nerf_config)
+        target_nerf_pipeline, target_nerf_transform = get_nerf_transform(self.targeting_data.nerf_config)
 
-    start_transforms: torch.Tensor = dict_to_tensor(start_transforms_dict)
-    target_transforms: torch.Tensor = dict_to_tensor(target_transforms_dict)
-    between_transforms: torch.Tensor = get_interpolation_transforms(start_transforms[-1, ...], target_transforms[0, ...], 500, args.interpolate_direction)
-    print(start_transforms.shape, between_transforms.shape)
+        """
+        all_transforms_world = torch.cat((start_transforms, between_transforms, target_transforms), dim=0)
 
-    all_transforms_world = torch.cat((start_transforms, between_transforms, target_transforms), dim=0)
-    print(all_transforms_world.shape)
+        all_transforms_start_nerf: torch.Tensor = torch.matmul(start_nerf_transform, all_transforms_world)
+        all_transforms_target_nerf: torch.Tensor = torch.matmul(target_nerf_transform, all_transforms_world)
 
-    # get camera_to_worlds for the respective nerfs
-    start_nerf_pipeline, start_nerf_transform = get_nerf_transform(args.start_load_config)
-    target_nerf_pipeline, target_nerf_transform = get_nerf_transform(args.target_load_config)
+        cameras_start_nerf: Cameras = get_cameras(self.output_config.image_resolution, all_transforms_start_nerf)
+        cameras_target_nerf: Cameras = get_cameras(self.output_config.image_resolution, all_transforms_target_nerf)
 
-    print(start_nerf_transform.dtype, all_transforms_world.dtype)
-    all_transforms_start_nerf: torch.Tensor = torch.matmul(start_nerf_transform, all_transforms_world)
-    all_transforms_target_nerf: torch.Tensor = torch.matmul(target_nerf_transform, all_transforms_world)
+        # render all images and save them in a list
+        rendered_frames_start = render_trajectory_frames(start_nerf_pipeline, cameras_start_nerf, "rgb")
+        rendered_frames_target = render_trajectory_frames(target_nerf_pipeline, cameras_target_nerf, "rgb")
 
-    cameras_start_nerf: Cameras = get_cameras(args.image_resolution, all_transforms_start_nerf)
-    cameras_target_nerf: Cameras = get_cameras(args.image_resolution, all_transforms_target_nerf)
+        # render video choosing which frames to use on some arbitratry condition
+        save_video(rendered_frames_start, pathlib.Path("rendered_frames_start.mp4"))
+        save_video(rendered_frames_target, pathlib.Path("rendered_frames_target.mp4"))
+        """
 
-    # render all images and save them in a list
-    rendered_frames_start = render_trajectory_frames(start_nerf_pipeline, cameras_start_nerf, "rgb")
-    rendered_frames_target = render_trajectory_frames(target_nerf_pipeline, cameras_target_nerf, "rgb")
+        # get leading and ending frames if any
+        leading_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.starting_data.group_id), (0, self.starting_data.transition[0]), self.output_config.image_resolution)
+        leading_transition_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.starting_data.group_id), (self.starting_data.transition[0], self.starting_data.transition[1]), self.output_config.image_resolution)
 
-    # render video choosing which frames to use on some arbitratry condition
-    save_video(rendered_frames_start, pathlib.Path("rendered_frames_start.mp4"))
-    save_video(rendered_frames_target, pathlib.Path("rendered_frames_target.mp4"))
+        cameras_starting_transition: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(start_nerf_transform, start_transforms))
+        starting_transition_frames: typing.List[np.ndarray] = render_trajectory_frames(start_nerf_pipeline, cameras_starting_transition, "rgb")
+
+        cameras_starting_path: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(start_nerf_transform, between_transforms))
+        starting_path_frames: typing.List[np.ndarray] = render_trajectory_frames(start_nerf_pipeline, cameras_starting_path, "rgb")
+
+        cameras_targeting_path: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(target_nerf_transform, between_transforms))
+        targeting_path_frames: typing.List[np.ndarray] = render_trajectory_frames(target_nerf_pipeline, cameras_targeting_path, "rgb")
+
+        cameras_targeting_transition: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(target_nerf_transform, target_transforms))
+        targeting_transition_frames: typing.List[np.ndarray] = render_trajectory_frames(target_nerf_pipeline, cameras_targeting_transition, "rgb")
+
+        ending_transition_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.targeting_data.group_id), (self.targeting_data.transition[0], self.targeting_data.transition[1]), self.output_config.image_resolution)
+        ending_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.targeting_data.group_id), (self.targeting_data.transition[1], -1), self.output_config.image_resolution)
+
+        transitioned_frames = get_transition_frames(leading_frames, leading_transition_frames,
+                                                     starting_transition_frames, starting_path_frames,
+                                                     targeting_path_frames, targeting_transition_frames,
+                                                     ending_transition_frames, ending_frames)
+
+        if self.output_config.output_combined_frames:
+            save_frames(transitioned_frames, self.output_config.output_path)
+        if self.output_config.output_combined_video:
+            save_video(transitioned_frames, self.output_config.output_path / "transistioned_video.mp4")
+
+        # write info about how the script was executed
+        infoFile = self.output_config.output_path / 'info.txt'
+        with open(str(infoFile.resolve()), 'w') as f:
+            f.write('executed "{filename}" on {date}'.format(filename=sys.argv[0], date=now.strftime('%d/%m/%Y %H:%M:%S')))
+            f.write('\n')
+            f.write('exact call was:')
+            f.write('\n\n')
+            f.write('python {argv}'.format(argv=" ".join(sys.argv)))
+
+
+def entrypoint():
+    """Entrypoint for use with pyproject scripts."""
+    tyro.extras.set_accent_color("bright_yellow")
+    tyro.cli(IntersectionTransition).main()
+
+
+if __name__ == "__main__":
+    entrypoint()
