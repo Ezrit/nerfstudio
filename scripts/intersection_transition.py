@@ -149,7 +149,7 @@ def save_frames(iamges: typing.List[np.ndarray], output_folder) -> None:
     pass
 
 
-def save_video(images: typing.List[np.ndarray], output_filename: pathlib.Path, seconds: float = 15.0) -> None:
+def save_video(images: typing.List[np.ndarray], output_filename: pathlib.Path, seconds: float = 20.0) -> None:
     fps = len(images) / seconds
     # make the folder if it doesn't exist
     output_filename.parent.mkdir(parents=True, exist_ok=True)
@@ -413,7 +413,6 @@ class IntersectionTransition:
 
         # get camera_to_worlds for the respective nerfs
         start_nerf_pipeline, start_nerf_transform = get_nerf_transform(self.starting_data.nerf_config)
-        target_nerf_pipeline, target_nerf_transform = get_nerf_transform(self.targeting_data.nerf_config)
 
         """
         all_transforms_world = torch.cat((start_transforms, between_transforms, target_transforms), dim=0)
@@ -443,6 +442,9 @@ class IntersectionTransition:
         cameras_starting_path: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(start_nerf_transform, between_transforms))
         starting_path_frames: typing.List[np.ndarray] = render_trajectory_frames(start_nerf_pipeline, cameras_starting_path, "rgb")
 
+        del start_nerf_pipeline, start_nerf_transform
+        target_nerf_pipeline, target_nerf_transform = get_nerf_transform(self.targeting_data.nerf_config)
+
         cameras_targeting_path: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(target_nerf_transform, between_transforms))
         targeting_path_frames: typing.List[np.ndarray] = render_trajectory_frames(target_nerf_pipeline, cameras_targeting_path, "rgb")
 
@@ -451,6 +453,10 @@ class IntersectionTransition:
 
         ending_transition_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.targeting_data.group_id), (self.targeting_data.transition[0], self.targeting_data.transition[1]), self.output_config.image_resolution)
         ending_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.targeting_data.group_id), (self.targeting_data.transition[1], -1), self.output_config.image_resolution)
+
+        del target_nerf_pipeline, target_nerf_transform
+
+        print('abc')
 
         transitioned_frames = get_transition_frames(leading_frames, leading_transition_frames,
                                                      starting_transition_frames, starting_path_frames,
