@@ -34,20 +34,20 @@ from nerfstudio.utils.rich_utils import ItersPerSecColumn
 CONSOLE = Console(width=120)
 
 
-def frame_list_interpolation(
+def frame_list_transition(
     frame_list_start: typing.List[np.ndarray],
     frame_list_end: typing.List[np.ndarray],
     multiplier_function: typing.Optional[Callable[[float], float]] = None
 ) -> typing.List[np.ndarray]:
-    interpolated_frame_list: typing.List[np.ndarray] = []
+    transitioned_frame_list: typing.List[np.ndarray] = []
     length = float(min(len(frame_list_start), len(frame_list_end)))
     for i, (start_frame, end_frame) in enumerate(zip(frame_list_start, frame_list_end)):
         linear_multiplier: float = i / length
         actual_multiplier: float = linear_multiplier if multiplier_function is None else multiplier_function(linear_multiplier)
 
-        interpolated_frame: np.ndarray = (1.0 - actual_multiplier) * start_frame + actual_multiplier * end_frame
-        interpolated_frame_list.append(interpolated_frame)
-    return interpolated_frame_list
+        transitioned_frame: np.ndarray = (1.0 - actual_multiplier) * start_frame + actual_multiplier * end_frame
+        transitioned_frame_list.append(transitioned_frame)
+    return transitioned_frame_list
 
 
 def get_transition_frames(
@@ -64,13 +64,13 @@ def get_transition_frames(
     transitioned_frames: typing.List[np.ndarray] = leading_frames
 
     # Transition from leading -> starting nerf
-    transitioned_frames.extend(frame_list_interpolation(leading_transistion_frames, starting_transistion_frames))
+    transitioned_frames.extend(frame_list_transition(leading_transistion_frames, starting_transistion_frames))
 
     # Transition from starting nerf -> targeting nerf
-    transitioned_frames.extend(frame_list_interpolation(starting_path_frames, targeting_path_frames))
+    transitioned_frames.extend(frame_list_transition(starting_path_frames, targeting_path_frames))
 
     # Transition from targeting nerf -> ending
-    transitioned_frames.extend(frame_list_interpolation(targeting_transistion_frames, ending_transistion_frames))
+    transitioned_frames.extend(frame_list_transition(targeting_transistion_frames, ending_transistion_frames))
 
     # end with ending frames
     transitioned_frames.extend(ending_frames)
@@ -173,18 +173,37 @@ def get_nerf_transform(load_config_path: pathlib.Path) -> typing.Tuple[Pipeline,
     return pipeline, transform
 
 
+def get_intersection_point(start_transforms: torch.Tensor, target_transforms: torch.Tensor, degree: int = 1) -> np.ndarray:
+    # get polynomial of start_transforms
+    start_x: np.ndarray = start_transforms[:, 0].numpy()
+    start_y: np.ndarray = start_transforms[:, 2].numpy()
+    start_polynomial: np.polynomial.Polynomial = np.polynomial.Polynomial.fit(start_x, start_y, degree)
+
+    # get polynomial of target_transforms
+    target_x: np.ndarray = target_transforms[:, 0].numpy()
+    target_y: np.ndarray = target_transforms[:, 2].numpy()
+    target_polynomial: np.polynomial.Polynomial = np.polynomial.Polynomial.fit(target_x, target_y, degree)
+
+    # get intersection (should only be 1 with degree 1 at least..., so just use the first for now)
+    intersection_x: float = (start_polynomial - target_polynomial).roots()[0]
+    intersection_y: float = start_polynomial(intersection_x)
+
+    intersection_z: float = float((np.mean(start_transforms[:, 1].numpy()) + np.mean(target_transforms[:, 1].numpy())) / 2.0)
+    intersection_point: np.ndarray = np.array([intersection_x, intersection_z, intersection_y])
+
+    return intersection_point
+
+
 # return an numpy array with the interpolated transforms. For the interpolation a middle point is generated with start x and end z (or vice versa depending on direction).
 # y for the middle point is just the mean of both
-def get_interpolation_transforms(start_transform: torch.Tensor, end_transform: torch.Tensor, num_interpolation: int = 500, direction: int = 0) -> torch.Tensor:
+def get_interpolation_transforms(start_transform: torch.Tensor, end_transform: torch.Tensor, intersection_point: np.ndarray, num_interpolation: int = 500) -> torch.Tensor:
 
     # first interpolate the positions via spline...
     start_point = np.array(start_transform[:3, 3])
     end_point = np.array(end_transform[:3, 3])
 
-    middle_point = np.array((start_point[0], (start_point[1] + end_point[1]) / 2.0, end_point[2]))
-    if direction > 0:
-        middle_point[0] = end_point[0]
-        middle_point[2] = start_point[2]
+    middle_point = intersection_point[:3]
+
     key_times = np.array((0, 1, 2))
     key_positions = np.array((start_point, middle_point, end_point))
 
@@ -409,7 +428,8 @@ class IntersectionTransition:
 
         start_transforms: torch.Tensor = dict_to_tensor(start_transforms_dict)
         target_transforms: torch.Tensor = dict_to_tensor(target_transforms_dict)
-        between_transforms: torch.Tensor = get_interpolation_transforms(start_transforms[-1, ...], target_transforms[0, ...], self.path_config.number_points, self.interpolate_direction)
+        intersection_point: np.ndarray = get_intersection_point(start_transforms, target_transforms, 1)
+        between_transforms: torch.Tensor = get_interpolation_transforms(start_transforms[-1, ...], target_transforms[0, ...], intersection_point, self.path_config.number_points)
 
         # get camera_to_worlds for the respective nerfs
         start_nerf_pipeline, start_nerf_transform = get_nerf_transform(self.starting_data.nerf_config)
@@ -459,9 +479,9 @@ class IntersectionTransition:
         print('abc')
 
         transitioned_frames = get_transition_frames(leading_frames, leading_transition_frames,
-                                                     starting_transition_frames, starting_path_frames,
-                                                     targeting_path_frames, targeting_transition_frames,
-                                                     ending_transition_frames, ending_frames)
+                                                    starting_transition_frames, starting_path_frames,
+                                                    targeting_path_frames, targeting_transition_frames,
+                                                    ending_transition_frames, ending_frames)
 
         if self.output_config.output_combined_frames:
             save_frames(transitioned_frames, self.output_config.output_path)
