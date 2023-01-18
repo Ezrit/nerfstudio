@@ -78,6 +78,8 @@ def get_weights_and_masks(image_idx: int, alpha_threshold: float, weighting_type
     image_filename = filenames[image_idx]
     pil_alpha = Image.open(image_filename)
     alpha = np.array(pil_alpha, dtype="uint8")  # shape is (h, w)
+    if len(alpha.shape) == 3:
+        alpha = alpha[:, :, 0]
     alpha = alpha[..., np.newaxis]
     assert len(alpha.shape) == 3
     assert alpha.dtype == np.uint8
@@ -140,6 +142,7 @@ class Metashape(DataParser):
         msk_filenames = []
         poses = []
         sub_folder = ''
+        split = 'train'
 
         change_axis = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
         change_axis_rot = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
