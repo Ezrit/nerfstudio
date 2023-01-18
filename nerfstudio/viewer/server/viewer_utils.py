@@ -28,14 +28,19 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import (
+    RTCConfiguration,
+    RTCIceServer,
+    RTCPeerConnection,
+    RTCSessionDescription,
+)
 from cryptography.utils import CryptographyDeprecationWarning
 from rich.console import Console
 
-from nerfstudio.cameras.cameras import Cameras
+from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.configs import base_config as cfg
-from nerfstudio.data.utils.datasets import InputDataset
+from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.models.base_model import Model
 from nerfstudio.utils import colormaps, profiler, writer
 from nerfstudio.utils.decorators import check_main_thread, decorate_all
@@ -53,6 +58,13 @@ from nerfstudio.viewer.server.visualizer import Viewer
 warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
 
 CONSOLE = Console(width=120)
+
+
+def get_viewer_version() -> str:
+    """Get the version of the viewer."""
+    json_filename = os.path.join(os.path.dirname(__file__), "../app/package.json")
+    version = load_from_json(Path(json_filename))["version"]
+    return version
 
 
 @check_main_thread
@@ -230,8 +242,7 @@ class ViewerState:
             )
             # TODO(ethan): log the output of the viewer bridge server in a file where the training logs go
             CONSOLE.line()
-            json_filename = os.path.join(os.path.dirname(__file__), "../app/package.json")
-            version = load_from_json(Path(json_filename))["version"]
+            version = get_viewer_version()
             websocket_url = f"ws://localhost:{self.config.websocket_port}"
             self.viewer_url = f"https://viewer.nerf.studio/versions/{version}/?websocket_url={websocket_url}"
             CONSOLE.rule(characters="=")
@@ -268,6 +279,22 @@ class ViewerState:
         self.webrtc_thread = None
         self.kill_webrtc_signal = False
 
+    def _pick_drawn_image_idxs(self, total_num: int) -> list[int]:
+        """Determine indicies of images to display in viewer.
+
+        Args:
+            total_num: total number of training images.
+
+        Returns:
+            List of indices from [0, total_num-1].
+        """
+        if self.config.max_num_display_images < 0:
+            num_display_images = total_num
+        else:
+            num_display_images = min(self.config.max_num_display_images, total_num)
+        # draw indices, roughly evenly spaced
+        return np.linspace(0, total_num - 1, num_display_images, dtype=np.int32).tolist()
+
     def init_scene(self, dataset: InputDataset, start_train=True) -> None:
         """Draw some images and the scene aabb in the viewer.
 
@@ -284,19 +311,21 @@ class ViewerState:
         self.vis["sceneState/cameras"].delete()
 
         # draw the training cameras and images
-        image_indices = range(len(dataset))
+        image_indices = self._pick_drawn_image_idxs(len(dataset))
         for idx in image_indices:
             image = dataset[idx]["image"]
             bgr = image[..., [2, 1, 0]]
-            camera_json = dataset.dataparser_outputs.cameras.to_json(camera_idx=idx, image=bgr, max_size=100)
+            camera_json = dataset.cameras.to_json(camera_idx=idx, image=bgr, max_size=100)
             self.vis[f"sceneState/cameras/{idx:06d}"].write(camera_json)
 
         # draw the scene box (i.e., the bounding box)
-        json_ = dataset.dataparser_outputs.scene_box.to_json()
+        json_ = dataset.scene_box.to_json()
         self.vis["sceneState/sceneBox"].write(json_)
 
         # set the initial state whether to train or not
         self.vis["renderingState/isTraining"].write(start_train)
+
+        # self.vis["renderingState/render_time"].write(str(0))
 
         # set the properties of the camera
         # self.vis["renderingState/camera"].write(json_)
@@ -345,6 +374,9 @@ class ViewerState:
             step: iteration step of training
             graph: the current checkpoint of the model
         """
+
+        has_temporal_distortion = getattr(graph, "temporal_distortion", None) is not None
+        self.vis["model/has_temporal_distortion"].write(str(has_temporal_distortion).lower())
 
         is_training = self.vis["renderingState/isTraining"].read()
         self.step = step
@@ -422,14 +454,27 @@ class ViewerState:
         else:
             self.prev_camera_matrix = camera_object["matrix"]
             self.camera_moving = True
+
+        output_type = self.vis["renderingState/output_choice"].read()
+        if output_type is None:
+            output_type = OutputTypes.INIT
+        if self.prev_output_type != output_type:
+            self.camera_moving = True
+
+        colormap_type = self.vis["renderingState/colormap_choice"].read()
+        if colormap_type is None:
+            colormap_type = ColormapTypes.INIT
+        if self.prev_colormap_type != colormap_type:
+            self.camera_moving = True
+
         return camera_object
 
-    def _apply_colormap(self, outputs: Dict[str, Any], stuff_colors: torch.Tensor = None, eps=1e-6):
+    def _apply_colormap(self, outputs: Dict[str, Any], colors: torch.Tensor = None, eps=1e-6):
         """Determines which colormap to use based on set colormap type
 
         Args:
             outputs: the output tensors for which to apply colormaps on
-            stuff_colors: is only set if colormap is for semantics. Defaults to None.
+            colors: is only set if colormap is for semantics. Defaults to None.
             eps: epsilon to handle floating point comparisons
         """
         if self.output_list:
@@ -464,8 +509,8 @@ class ViewerState:
         ):
             logits = outputs[reformatted_output]
             labels = torch.argmax(torch.nn.functional.softmax(logits, dim=-1), dim=-1)  # type: ignore
-            assert stuff_colors is not None
-            return stuff_colors[labels]
+            assert colors is not None
+            return colors[labels]
 
         # rendering boolean outputs
         if self.prev_colormap_type == ColormapTypes.BOOLEAN or (
@@ -481,7 +526,28 @@ class ViewerState:
         # returns the description to for WebRTC to the specific websocket connection
         offer = RTCSessionDescription(data["sdp"], data["type"])
 
-        pc = RTCPeerConnection()
+        if self.config.skip_openrelay:
+            ice_servers = [
+                RTCIceServer(urls="stun:stun.l.google.com:19302"),
+            ]
+        else:
+            ice_servers = [
+                RTCIceServer(urls="stun:stun.l.google.com:19302"),
+                RTCIceServer(urls="stun:openrelay.metered.ca:80"),
+                RTCIceServer(
+                    urls="turn:openrelay.metered.ca:80", username="openrelayproject", credential="openrelayproject"
+                ),
+                RTCIceServer(
+                    urls="turn:openrelay.metered.ca:443", username="openrelayproject", credential="openrelayproject"
+                ),
+                RTCIceServer(
+                    urls="turn:openrelay.metered.ca:443?transport=tcp",
+                    username="openrelayproject",
+                    credential="openrelayproject",
+                ),
+            ]
+
+        pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
         self.pcs.add(pc)
 
         video = SingleFrameStreamTrack()
@@ -510,12 +576,12 @@ class ViewerState:
         for video_track in self.video_tracks:
             video_track.put_frame(image)
 
-    def _send_output_to_viewer(self, outputs: Dict[str, Any], stuff_colors: torch.Tensor = None, eps=1e-6):
+    def _send_output_to_viewer(self, outputs: Dict[str, Any], colors: torch.Tensor = None, eps=1e-6):
         """Chooses the correct output and sends it to the viewer
 
         Args:
             outputs: the dictionary of outputs to choose from, from the graph
-            stuff_colors: is only set if colormap is for semantics. Defaults to None.
+            colors: is only set if colormap is for semantics. Defaults to None.
             eps: epsilon to handle floating point comparisons
         """
         if self.output_list is None:
@@ -542,7 +608,7 @@ class ViewerState:
             self.output_type_changed = False
             self.vis["renderingState/colormap_choice"].write(self.prev_colormap_type)
             self.vis["renderingState/colormap_options"].write(colormap_options)
-        selected_output = (self._apply_colormap(outputs, stuff_colors) * 255).type(torch.uint8)
+        selected_output = (self._apply_colormap(outputs, colors) * 255).type(torch.uint8)
         image = selected_output.cpu().numpy()
         self.set_image(image)
 
@@ -619,9 +685,12 @@ class ViewerState:
 
         aspect_ratio = camera_object["aspect"]
 
-        image_height = (num_vis_rays / aspect_ratio) ** 0.5
-        image_height = int(round(image_height, -1))
-        image_height = min(self.max_resolution, image_height)
+        if not self.camera_moving and not is_training:
+            image_height = self.max_resolution
+        else:
+            image_height = (num_vis_rays / aspect_ratio) ** 0.5
+            image_height = int(round(image_height, -1))
+            image_height = min(self.max_resolution, image_height)
         image_width = int(image_height * aspect_ratio)
         if image_width > self.max_resolution:
             image_width = self.max_resolution
@@ -652,6 +721,7 @@ class ViewerState:
 
     @profiler.time_function
     def _render_image_in_viewer(self, camera_object, graph: Model, is_training: bool) -> None:
+        # pylint: disable=too-many-statements
         """
         Draw an image using the current camera pose from the viewer.
         The image is sent of a TCP connection and then uses WebRTC to send it to the viewer.
@@ -702,12 +772,28 @@ class ViewerState:
             dim=0,
         )
 
+        times = self.vis["renderingState/render_time"].read()
+        if times is not None:
+            times = torch.tensor([float(times)])
+
+        camera_type_msg = camera_object["camera_type"]
+        if camera_type_msg == "perspective":
+            camera_type = CameraType.PERSPECTIVE
+        elif camera_type_msg == "fisheye":
+            camera_type = CameraType.FISHEYE
+        elif camera_type_msg == "equirectangular":
+            camera_type = CameraType.EQUIRECTANGULAR
+        else:
+            camera_type = CameraType.PERSPECTIVE
+
         camera = Cameras(
             fx=intrinsics_matrix[0, 0],
             fy=intrinsics_matrix[1, 1],
             cx=intrinsics_matrix[0, 2],
             cy=intrinsics_matrix[1, 2],
+            camera_type=camera_type,
             camera_to_worlds=camera_to_world[None, ...],
+            times=times,
         )
         camera = camera.to(graph.device)
 
@@ -742,8 +828,8 @@ class ViewerState:
         graph.train()
         outputs = render_thread.vis_outputs
         if outputs is not None:
-            stuff_colors = graph.stuff_colors if hasattr(graph, "stuff_colors") else None
-            self._send_output_to_viewer(outputs, stuff_colors=stuff_colors)
+            colors = graph.colors if hasattr(graph, "colors") else None
+            self._send_output_to_viewer(outputs, colors=colors)
             self._update_viewer_stats(
                 vis_t.duration, num_rays=len(camera_ray_bundle), image_height=image_height, image_width=image_width
             )

@@ -17,11 +17,12 @@ Camera transformation helper code.
 """
 
 import math
-from typing import List, Literal, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
 from torchtyping import TensorType
+from typing_extensions import Literal
 
 _EPS = np.finfo(float).eps * 4.0
 
@@ -229,6 +230,21 @@ def normalize(x) -> TensorType[...]:
     return x / torch.linalg.norm(x)
 
 
+def normalize_with_norm(x: torch.Tensor, dim: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Normalize tensor along axis and return normalized value with norms.
+
+    Args:
+        x: tensor to normalize.
+        dim: axis along which to normalize.
+
+    Returns:
+        Tuple of normalized tensor and corresponding norm.
+    """
+
+    norm = torch.maximum(torch.linalg.vector_norm(x, dim=dim, keepdims=True), torch.tensor([_EPS]).to(x))
+    return x / norm, norm
+
+
 def viewmatrix(lookat, up, pos) -> TensorType[...]:
     """Returns a camera transformation matrix.
 
@@ -341,7 +357,7 @@ def _compute_residual_and_jacobian(
 def radial_and_tangential_undistort(
     coords: torch.Tensor,
     distortion_params: torch.Tensor,
-    eps: float = 1e-9,
+    eps: float = 1e-3,
     max_iterations: int = 10,
 ) -> torch.Tensor:
     """Computes undistorted coords given opencv distortion parameters.
@@ -406,38 +422,44 @@ def rotation_matrix(a: TensorType[3], b: TensorType[3]) -> TensorType[3, 3]:
     return torch.eye(3) + skew_sym_mat + skew_sym_mat @ skew_sym_mat * ((1 - c) / (s**2 + 1e-8))
 
 
-def auto_orient_poses(
-    poses: TensorType["num_poses":..., 4, 4], method: Literal["pca", "up"] = "up"
-) -> TensorType["num_poses":..., 3, 4]:
+def auto_orient_and_center_poses(
+    poses: TensorType["num_poses":..., 4, 4], method: Literal["pca", "up", "none"] = "up", center_poses: bool = True
+) -> Tuple[TensorType["num_poses":..., 3, 4], TensorType[4, 4]]:
     """Orients and centers the poses. We provide two methods for orientation: pca and up.
 
     pca: Orient the poses so that the principal component of the points is aligned with the axes.
         This method works well when all of the cameras are in the same plane.
-
     up: Orient the poses so that the average up vector is aligned with the z axis.
         This method works well when images are not at arbitrary angles.
 
+
     Args:
         poses: The poses to orient.
-        method: The method to use for orientation. Either "pca" or "up".
+        method: The method to use for orientation.
+        center_poses: If True, the poses are centered around the origin.
 
     Returns:
-        The oriented poses.
+        Tuple of the oriented poses and the transform matrix.
     """
 
     translation = poses[..., :3, 3]
 
     mean_translation = torch.mean(translation, dim=0)
-    translation = translation - mean_translation
+    translation_diff = translation - mean_translation
+
+    if center_poses:
+        translation = mean_translation
+    else:
+        translation = torch.zeros_like(mean_translation)
 
     if method == "pca":
-        _, eigvec = torch.linalg.eigh(translation.T @ translation)
+        _, eigvec = torch.linalg.eigh(translation_diff.T @ translation_diff)
         eigvec = torch.flip(eigvec, dims=(-1,))
 
         if torch.linalg.det(eigvec) < 0:
             eigvec[:, 2] = -eigvec[:, 2]
 
-        transform = torch.cat([eigvec, eigvec @ -mean_translation[..., None]], dim=-1)
+        transform = torch.cat([eigvec, eigvec @ -translation[..., None]], dim=-1)
         oriented_poses = transform @ poses
 
         if oriented_poses.mean(axis=0)[2, 1] < 0:
@@ -447,56 +469,12 @@ def auto_orient_poses(
         up = up / torch.linalg.norm(up)
 
         rotation = rotation_matrix(up, torch.Tensor([0, 0, 1]))
-        transform = torch.cat([rotation, rotation @ -mean_translation[..., None]], dim=-1)
+        transform = torch.cat([rotation, rotation @ -translation[..., None]], dim=-1)
+        oriented_poses = transform @ poses
+    elif method == "none":
+        transform = torch.eye(4)
+        transform[:3, 3] = -translation
+        transform = transform[:3, :]
         oriented_poses = transform @ poses
 
-    return oriented_poses
-
-
-def auto_orient_poses_transform(
-    poses: TensorType["num_poses":..., 4, 4], method: Literal["pca", "up"] = "up"
-) -> TensorType[4, 4]:
-    """Orients and centers the poses. We provide two methods for orientation: pca and up.
-
-    pca: Orient the poses so that the principal component of the points is aligned with the axes.
-        This method works well when all of the cameras are in the same plane.
-
-    up: Orient the poses so that the average up vector is aligned with the z axis.
-        This method works well when images are not at arbitrary angles.
-
-    Args:
-        poses: The poses to orient.
-        method: The method to use for orientation. Either "pca" or "up".
-
-    Returns:
-        The oriented poses.
-    """
-
-    translation = poses[..., :3, 3]
-
-    mean_translation = torch.mean(translation, dim=0)
-    translation = translation - mean_translation
-
-    if method == "pca":
-        _, eigvec = torch.linalg.eigh(translation.T @ translation)
-        eigvec = torch.flip(eigvec, dims=(-1,))
-
-        if torch.linalg.det(eigvec) < 0:
-            eigvec[:, 2] = -eigvec[:, 2]
-
-        transform = torch.cat([eigvec, eigvec @ -mean_translation[..., None]], dim=-1)
-        oriented_poses = transform @ poses
-
-        if oriented_poses.mean(axis=0)[2, 1] < 0:
-            oriented_poses[:, 1:3] = -1 * oriented_poses[:, 1:3]
-    elif method == "up":
-        up = torch.mean(poses[:, :3, 1], dim=0)
-        up = up / torch.linalg.norm(up)
-
-        rotation = rotation_matrix(up, torch.Tensor([0, 0, 1]))
-        transform = torch.cat([rotation, rotation @ -mean_translation[..., None]], dim=-1)
-        oriented_poses = transform @ poses
-
-    # TODO: transform bei pca methode anpassen, wenn die oriented_poses bedingung erfuellt ist...
-    transform = torch.cat([transform, torch.tensor([[0, 0, 0, 1]])], dim=0)
-    return transform
+    return oriented_poses, transform

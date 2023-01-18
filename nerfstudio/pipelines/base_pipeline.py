@@ -35,9 +35,10 @@ from rich.progress import (
 from torch import nn
 from torch.nn import Parameter
 from torch.nn.parallel import DistributedDataParallel as DDP
+from typing_extensions import Literal
 
 from nerfstudio.configs import base_config as cfg
-from nerfstudio.data.datamanagers import (
+from nerfstudio.data.datamanagers.base_datamanager import (
     DataManager,
     VanillaDataManager,
     VanillaDataManagerConfig,
@@ -77,7 +78,10 @@ class Pipeline(nn.Module):
     Args:
         config: configuration to instantiate pipeline
         device: location to place model and data
-        test_mode: if True, loads test datset. if False, loads train/eval datasets
+        test_mode:
+            'train': loads train/eval datasets into memory
+            'test': loads train/test datset into memory
+            'inference': does not load any dataset into memory
         world_size: total number of machines available
         local_rank: rank of current machine
 
@@ -191,7 +195,10 @@ class VanillaPipeline(Pipeline):
 
         config: configuration to instantiate pipeline
         device: location to place model and data
-        test_mode: if True, loads test datset. if False, loads train/eval datasets
+        test_mode:
+            'val': loads train/val datasets into memory
+            'test': loads train/test datset into memory
+            'inference': does not load any dataset into memory
         world_size: total number of machines available
         local_rank: rank of current machine
 
@@ -204,12 +211,13 @@ class VanillaPipeline(Pipeline):
         self,
         config: VanillaPipelineConfig,
         device: str,
-        test_mode: bool = False,
+        test_mode: Literal["test", "val", "inference"] = "val",
         world_size: int = 1,
         local_rank: int = 0,
     ):
         super().__init__()
         self.config = config
+        self.test_mode = test_mode
         self.datamanager: VanillaDataManager = config.datamanager.setup(
             device=device, test_mode=test_mode, world_size=world_size, local_rank=local_rank
         )
@@ -218,18 +226,15 @@ class VanillaPipeline(Pipeline):
         assert self.datamanager.train_dataset is not None, "Missing input dataset"
 
         self._model = config.model.setup(
-            scene_box=self.datamanager.train_dataset.dataparser_outputs.scene_box,
+            scene_box=self.datamanager.train_dataset.scene_box,
             num_train_data=len(self.datamanager.train_dataset),
-            semantics=self.datamanager.train_dataset.dataparser_outputs.semantics,
-            device=device,
+            metadata=self.datamanager.train_dataset.metadata,
         )
         self.model.to(device)
 
         self.world_size = world_size
         if world_size > 1:
-            self._model = typing.cast(
-                Model, typing.cast(Model, DDP(self._model, device_ids=[local_rank], find_unused_parameters=True))
-            )
+            self._model = typing.cast(Model, DDP(self._model, device_ids=[local_rank], find_unused_parameters=True))
             dist.barrier(device_ids=[local_rank])
 
     @property
@@ -333,7 +338,7 @@ class VanillaPipeline(Pipeline):
                 metrics_dict, _ = self.model.get_image_metrics_and_images(outputs, batch)
                 assert "num_rays_per_sec" not in metrics_dict
                 metrics_dict["num_rays_per_sec"] = num_rays / (time() - inner_start)
-                fps_str = f"fps_at_{height}x{width}"
+                fps_str = "fps"
                 assert fps_str not in metrics_dict
                 metrics_dict[fps_str] = metrics_dict["num_rays_per_sec"] / (height * width)
                 metrics_dict_list.append(metrics_dict)
@@ -354,6 +359,12 @@ class VanillaPipeline(Pipeline):
             loaded_state: pre-trained model state dict
         """
         state = {key.replace("module.", ""): value for key, value in loaded_state.items()}
+        if self.test_mode == "inference":
+            state.pop("datamanager.train_camera_optimizer.pose_adjustment", None)
+            state.pop("datamanager.train_ray_generator.image_coords", None)
+            state.pop("datamanager.train_ray_generator.pose_optimizer.pose_adjustment", None)
+            state.pop("datamanager.eval_ray_generator.image_coords", None)
+            state.pop("datamanager.eval_ray_generator.pose_optimizer.pose_adjustment", None)
         self.load_state_dict(state)  # type: ignore
 
     def get_training_callbacks(

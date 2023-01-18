@@ -166,7 +166,6 @@ def write_out_storage():
     EVENT_STORAGE.clear()
 
 
-@check_main_thread
 def setup_local_writer(config: cfg.LoggingConfig, max_iter: int, banner_messages: Optional[List[str]] = None) -> None:
     """Initialization of all event writers specified in config
 
@@ -189,7 +188,7 @@ def setup_local_writer(config: cfg.LoggingConfig, max_iter: int, banner_messages
 
 
 @check_main_thread
-def setup_event_writer(config: cfg.Config, log_dir: Path) -> None:
+def setup_event_writer(is_wandb_enabled: bool, is_tensorboard_enabled: bool, log_dir: Path) -> None:
     """Initialization of all event writers specified in config
 
     Args:
@@ -198,19 +197,19 @@ def setup_event_writer(config: cfg.Config, log_dir: Path) -> None:
         banner_messages: list of messages to always display at bottom of screen
     """
     using_event_writer = False
-    if config.is_wandb_enabled():
+    if is_wandb_enabled:
         curr_writer = WandbWriter(log_dir=log_dir)
         EVENT_WRITERS.append(curr_writer)
         using_event_writer = True
-    if config.is_tensorboard_enabled():
+    if is_tensorboard_enabled:
         curr_writer = TensorboardWriter(log_dir=log_dir)
         EVENT_WRITERS.append(curr_writer)
         using_event_writer = True
     if using_event_writer:
         string = f"logging events to: {log_dir}"
     else:
-        string = "disabled tensorboard/wandb event writers"
-    CONSOLE.print(f"[bold red]{string}")
+        string = "Disabled tensorboard/wandb event writers"
+    CONSOLE.print(f"[bold yellow]{string}")
 
 
 class Writer:
@@ -383,12 +382,12 @@ class LocalWriter:
         Args:
             step: current train step
         """
-        valid_step = step > 0 and step % GLOBAL_BUFFER["steps_per_log"] == 0
+        valid_step = step % GLOBAL_BUFFER["steps_per_log"] == 0
         if valid_step:
             if not self.has_printed and self.config.max_log_size:
                 CONSOLE.log(
                     f"Printing max of {self.config.max_log_size} lines. "
-                    "Set flag  `--logging.local-writer.max-log-size=0` "
+                    "Set flag [yellow]--logging.local-writer.max-log-size=0[/yellow] "
                     "to disable line wrapping."
                 )
             latest_map, new_key = self._consolidate_events()
@@ -431,10 +430,8 @@ class LocalWriter:
             self.past_mssgs[0] = mssg
             self.past_mssgs[1] = "-" * len(mssg)
             if full_log_cond or not self.has_printed:
-                print("testeing testing!")
                 print(mssg)
                 print("-" * len(mssg))
-                # self.has_printed = True
 
     def _print_stats(self, latest_map, padding=" "):
         """helper to print out the stats in a readable format

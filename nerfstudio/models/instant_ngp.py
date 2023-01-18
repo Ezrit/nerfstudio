@@ -28,6 +28,7 @@ from torch.nn import Parameter
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from typing_extensions import Literal
 
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.engine.callbacks import (
@@ -76,8 +77,8 @@ class InstantNGPModelConfig(ModelConfig):
     """How far along ray to stop sampling."""
     use_appearance_embedding: bool = False
     """Whether to use an appearance embedding."""
-    randomize_background: bool = True
-    """Whether to randomize the background color."""
+    background_color: Literal["random", "black", "white"] = "random"
+    """The color that is given to untrained areas."""
 
 
 class NGPModel(Model):
@@ -122,10 +123,13 @@ class NGPModel(Model):
         )
 
         # renderers
-        background_color = "random" if self.config.randomize_background else colors.WHITE
+        background_color = "random"
+        if self.config.background_color in ["white", "black"]:
+            background_color = colors.COLORS_DICT[self.config.background_color]
+
         self.renderer_rgb = RGBRenderer(background_color=background_color)
         self.renderer_accumulation = AccumulationRenderer()
-        self.renderer_depth = DepthRenderer()
+        self.renderer_depth = DepthRenderer(method="expected")
 
         # losses
         self.rgb_loss = MSELoss()
@@ -166,7 +170,7 @@ class NGPModel(Model):
         num_rays = len(ray_bundle)
 
         with torch.no_grad():
-            ray_samples, packed_info, ray_indices = self.sampler(
+            ray_samples, ray_indices = self.sampler(
                 ray_bundle=ray_bundle,
                 near_plane=self.config.near_plane,
                 far_plane=self.config.far_plane,
@@ -177,6 +181,7 @@ class NGPModel(Model):
         field_outputs = self.field(ray_samples)
 
         # accumulation
+        packed_info = nerfacc.pack_info(ray_indices, num_rays)
         weights = nerfacc.render_weight_from_density(
             packed_info=packed_info,
             sigmas=field_outputs[FieldHeadNames.DENSITY],

@@ -10,12 +10,12 @@ import shutil
 import stat
 import subprocess
 import sys
-from typing import List, Literal, Union
+from typing import List, Union
 
 import tyro
 from rich.console import Console
 from rich.prompt import Confirm
-from typing_extensions import assert_never
+from typing_extensions import Literal, assert_never
 
 ConfigureMode = Literal["install", "uninstall"]
 ShellType = Literal["zsh", "bash"]
@@ -95,13 +95,21 @@ def _generate_completion(
     target_path = completions_dir / shell / target_name
 
     # Generate and write the new completion.
-    new = subprocess.run(
-        args=args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        encoding="utf8",
-        check=True,
-    ).stdout
+    try:
+        new = subprocess.run(
+            args=args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf8",
+            check=True,
+        ).stdout
+    except subprocess.CalledProcessError as e:
+        CONSOLE.log(f":x: Completion script generation failed: {args}")
+        if e.stdout is not None and len(e.stdout) > 0:
+            CONSOLE.log(e.stdout)
+        if e.stderr is not None and len(e.stderr) > 0:
+            CONSOLE.log(e.stderr)
+        raise e
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
     if not target_path.exists():
@@ -133,52 +141,55 @@ def _update_rc(
     """
 
     # Install or uninstall `source_line`.
-    source_lines = "\n".join(
-        [
-            "",
-            "# Source nerfstudio autocompletions.",
-            "# From https://unix.stackexchange.com/questions/339954/zsh-command-not-found-compinstall-compinit-compdef",
-            "autoload -Uz compinit",
-            "compinit",
-            f"source {completions_dir / 'setup'}.{shell}",
-        ]
-    )
+    header_line = "# Source nerfstudio autocompletions."
+    if shell == "zsh":
+        source_lines = "\n".join(
+            [
+                "",
+                header_line,
+                "if ! command -v compdef &> /dev/null; then",
+                "    autoload -Uz compinit",
+                "    compinit",
+                "fi",
+                f"source {completions_dir / 'setup.zsh'}",
+            ]
+        )
+    elif shell == "bash":
+        source_lines = "\n".join(
+            [
+                "",
+                header_line,
+                f"source {completions_dir / 'setup.bash'}",
+            ]
+        )
+    else:
+        assert_never(shell)
+
     rc_path = pathlib.Path(os.environ["HOME"]) / f".{shell}rc"
+
+    # Always try to uninstall previous completions.
+    rc_source = rc_path.read_text()
+    while header_line in rc_source:
+        before_install, _, after_install = rc_source.partition(header_line)
+        source_file, _, after_install = after_install.partition("\nsource ")[2].partition("\n")
+        assert source_file.endswith(f"/completions/setup.{shell}")
+        rc_source = before_install + after_install
+        rc_path.write_text(rc_source)
+        CONSOLE.log(f":broom: Existing completions uninstalled from {rc_path}.")
+
+    # Install completions.
     if mode == "install":
-        if source_lines in rc_path.read_text():
-            CONSOLE.log(f":call_me_hand: Completions are already installed in {rc_path}. {_exclamation()}")
-            return
-
-        if not Confirm.ask(f"[bold yellow]Install to {rc_path}?", default=True):
-            CONSOLE.log(f"[bold red]Skipping install for {rc_path.name}.")
-            return
-
-        rc_path.write_text(rc_path.read_text() + source_lines)
+        assert source_lines not in rc_source
+        rc_path.write_text(rc_source.rstrip() + "\n" + source_lines)
         CONSOLE.log(
             f":person_gesturing_ok: Completions installed to {rc_path}. {_exclamation()} Open a new shell to try them"
             " out."
         )
-
-    elif mode == "uninstall":
-        if source_lines not in rc_path.read_text():
-            CONSOLE.log(f":heavy_check_mark: No completions to uninstall from {rc_path.name}.")
-            return
-
-        if not Confirm.ask(f"[bold yellow]Uninstall from {rc_path}?", default=True):
-            CONSOLE.log(f"[dim red]Skipping uninstall for {rc_path.name}.")
-            return
-
-        rc_path.write_text(rc_path.read_text().replace(source_lines, ""))
-        CONSOLE.log(f":broom: Completions uninstalled from {rc_path}.")
-
     else:
-        assert_never(mode)
+        assert mode == "uninstall"
 
 
-def main(
-    mode: ConfigureMode = "install",
-    /,
-) -> None:
+def main(mode: ConfigureMode = "install") -> None:
     """Main script.
 
     Args:

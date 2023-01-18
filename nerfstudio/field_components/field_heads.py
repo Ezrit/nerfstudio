@@ -18,6 +18,7 @@ Collection of render heads
 from enum import Enum
 from typing import Callable, Optional, Union
 
+import torch
 from torch import nn
 from torchtyping import TensorType
 
@@ -30,12 +31,12 @@ class FieldHeadNames(Enum):
     RGB = "rgb"
     SH = "sh"
     DENSITY = "density"
+    NORMALS = "normals"
+    PRED_NORMALS = "pred_normals"
     UNCERTAINTY = "uncertainty"
     TRANSIENT_RGB = "transient_rgb"
     TRANSIENT_DENSITY = "transient_density"
     SEMANTICS = "semantics"
-    SEMANTICS_STUFF = "semantics_stuff"
-    SEMANTICS_THING = "semantics_thing"
 
 
 class FieldHead(FieldComponent):
@@ -171,7 +172,7 @@ class TransientDensityFieldHead(FieldHead):
 
 
 class SemanticFieldHead(FieldHead):
-    """Semantic stuff output
+    """Semantic output
 
     Args:
         num_classes: Number of semantic classes
@@ -183,31 +184,19 @@ class SemanticFieldHead(FieldHead):
         super().__init__(in_dim=in_dim, out_dim=num_classes, field_head_name=FieldHeadNames.SEMANTICS, activation=None)
 
 
-class SemanticStuffFieldHead(FieldHead):
-    """Semantic stuff output
+class PredNormalsFieldHead(FieldHead):
+    """Predicted normals output.
 
     Args:
-        num_classes: Number of semantic classes
         in_dim: input dimension. If not defined in constructor, it must be set later.
         activation: output head activation
     """
 
-    def __init__(self, num_classes: int, in_dim: Optional[int] = None) -> None:
-        super().__init__(
-            in_dim=in_dim, out_dim=num_classes, field_head_name=FieldHeadNames.SEMANTICS_STUFF, activation=None
-        )
+    def __init__(self, in_dim: Optional[int] = None, activation: Optional[nn.Module] = nn.Tanh()) -> None:
+        super().__init__(in_dim=in_dim, out_dim=3, field_head_name=FieldHeadNames.PRED_NORMALS, activation=activation)
 
-
-class SemanticThingFieldHead(FieldHead):
-    """Semantic thing output
-
-    Args:
-        num_classes: Number of semantic classes
-        in_dim: input dimension. If not defined in constructor, it must be set later.
-        activation: output head activation
-    """
-
-    def __init__(self, num_classes: int, in_dim: Optional[int] = None) -> None:
-        super().__init__(
-            in_dim=in_dim, out_dim=num_classes, field_head_name=FieldHeadNames.SEMANTICS_THING, activation=None
-        )
+    def forward(self, in_tensor: TensorType["bs":..., "in_dim"]) -> TensorType["bs":..., "out_dim"]:
+        """Needed to normalize the output into valid normals."""
+        out_tensor = super().forward(in_tensor)
+        out_tensor = torch.nn.functional.normalize(out_tensor, dim=-1)
+        return out_tensor

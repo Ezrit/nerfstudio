@@ -7,9 +7,24 @@ export const appTheme = createTheme({
     text: {
       primary: '#EEEEEE',
       secondary: '#FFD369',
+      disabled: '#555555',
     },
   },
   components: {
+    MuiPaper: {
+      styleOverrides: {
+        root: {
+          backgroundColor: '#222831',
+        },
+      },
+    },
+    MuiIcon: {
+      styleOverrides: {
+        root: {
+          color: '#eeeeee',
+        },
+      },
+    },
     MuiTextField: {
       styleOverrides: {
         root: {
@@ -111,15 +126,46 @@ export const appTheme = createTheme({
       styleOverrides: {
         root: {
           color: '#eeeeee',
-          backgroundColor: '#393e46',
+          backgroundColor: 'FFD369',
           '&.Mui-selected': {
-            color: '#FFD369',
-            backgroundColor: '#555555',
+            color: '#222831',
+            backgroundColor: '#FFD369',
+            ':hover': {
+              backgroundColor: '#FFD369',
+            },
           },
           '&.Mui-disabled': {
             color: '#999999',
             backgroundColor: '#393e46',
           },
+        },
+      },
+    },
+    MuiList: {
+      styleOverrides: {
+        padding: {
+          paddingTop: 4,
+          paddingBottom: 4,
+        },
+      },
+    },
+    MuiAccordionSummary: {
+      styleOverrides: {
+        root: {
+          '& .MuiAccordionSummary-content': {
+            margin: '0px',
+          },
+          '& .MuiAccordionSummary-content.Mui-expanded': {
+            margin: '0px',
+          },
+        },
+      },
+    },
+    MuiAccordionDetails: {
+      styleOverrides: {
+        root: {
+          paddingTop: '4px',
+          paddingBottom: '8px',
         },
       },
     },

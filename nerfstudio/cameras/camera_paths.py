@@ -23,7 +23,7 @@ import torch
 import nerfstudio.utils.poses as pose_utils
 from nerfstudio.cameras import camera_utils
 from nerfstudio.cameras.camera_utils import get_interpolated_poses_many
-from nerfstudio.cameras.cameras import Cameras
+from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.viewer.server.utils import three_js_perspective_camera_focal_length
 
 
@@ -69,6 +69,7 @@ def get_spiral_path(
     """
 
     assert radius is not None or radiuses is not None, "Either radius or radiuses must be specified."
+    assert camera.ndim == 1, "We assume only one batch dim here"
     if radius is not None and radiuses is None:
         rad = torch.tensor([radius] * 3, device=camera.device)
     elif radiuses is not None and radius is None:
@@ -99,7 +100,13 @@ def get_spiral_path(
         new_c2ws.append(c2wh[:3, :4])
     new_c2ws = torch.stack(new_c2ws, dim=0)
 
-    return Cameras(fx=camera.fx[0], fy=camera.fy[0], cx=camera.cx[0], cy=camera.cy[0], camera_to_worlds=new_c2ws)
+    return Cameras(
+        fx=camera.fx[0],
+        fy=camera.fy[0],
+        cx=camera.cx[0],
+        cy=camera.cy[0],
+        camera_to_worlds=new_c2ws,
+    )
 
 
 def get_path_from_json(camera_path: Dict[str, Any]) -> Cameras:
@@ -114,6 +121,19 @@ def get_path_from_json(camera_path: Dict[str, Any]) -> Cameras:
 
     image_height = camera_path["render_height"]
     image_width = camera_path["render_width"]
+    if "camera_type" in camera_path:
+        camera_type = camera_path["camera_type"]
+    else:
+        camera_type = "perspective"
+
+    if "camera_type" not in camera_path:
+        camera_type = CameraType.PERSPECTIVE
+    elif camera_path["camera_type"] == "fisheye":
+        camera_type = CameraType.FISHEYE
+    elif camera_path["camera_type"] == "equirectangular":
+        camera_type = CameraType.EQUIRECTANGULAR
+    else:
+        camera_type = CameraType.PERSPECTIVE
 
     c2ws = []
     fxs = []
@@ -122,11 +142,21 @@ def get_path_from_json(camera_path: Dict[str, Any]) -> Cameras:
         # pose
         c2w = torch.tensor(camera["camera_to_world"]).view(4, 4)[:3]
         c2ws.append(c2w)
-        # field of view
-        fov = camera["fov"]
-        focal_length = three_js_perspective_camera_focal_length(fov, image_height)
-        fxs.append(focal_length)
-        fys.append(focal_length)
+        if camera_type == CameraType.EQUIRECTANGULAR:
+            fxs.append(image_width / 2)
+            fys.append(image_height)
+        else:
+            # field of view
+            fov = camera["fov"]
+            focal_length = three_js_perspective_camera_focal_length(fov, image_height)
+            fxs.append(focal_length)
+            fys.append(focal_length)
+
+    # Iff ALL cameras in the path have a "time" value, construct Cameras with times
+    if all("render_time" in camera for camera in camera_path["camera_path"]):
+        times = torch.tensor([camera["render_time"] for camera in camera_path["camera_path"]])
+    else:
+        times = None
 
     camera_to_worlds = torch.stack(c2ws, dim=0)
     fx = torch.tensor(fxs)
@@ -137,4 +167,6 @@ def get_path_from_json(camera_path: Dict[str, Any]) -> Cameras:
         cx=image_width / 2,
         cy=image_height / 2,
         camera_to_worlds=camera_to_worlds,
+        camera_type=camera_type,
+        times=times,
     )
