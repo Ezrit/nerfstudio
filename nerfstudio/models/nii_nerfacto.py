@@ -41,7 +41,7 @@ from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.fields.nerfacto_field import TCNNNerfactoField
 from nerfstudio.model_components.losses import (
     MSELoss,
-    MSEWLoss,
+    PolarLoss,
     distortion_loss,
     interlevel_loss,
     orientation_loss,
@@ -190,7 +190,7 @@ class NIINerfactoModel(Model):
 
         # losses
         self.rgb_loss = MSELoss()
-        self.rgbw_loss = MSEWLoss
+        self.polar_rgb_loss = PolarLoss(MSELoss)
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
@@ -288,8 +288,11 @@ class NIINerfactoModel(Model):
         loss_dict = {}
         image = batch["image"].to(self.device)
         # loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
-        weight = batch["weight"].to(self.device) if "weight" in batch else torch.ones_like(image)
-        loss_dict["rgbw_loss"] = self.rgbw_loss(image, outputs["rgb"], weight)
+        #image_height, _ = batch["image_size"]
+        #weight = batch["indices"][:, 1].type(torch.FloatTensor).to(self.device).view(-1, 1) / image_height
+        #weight = torch.sin(torch.pi * weight)
+        #loss_dict["rgbw_loss"] = self.rgbw_loss(image, outputs["rgb"], weight)
+        loss_dict["polar_rgbw_loss"] = self.polar_rgb_loss(image, outputs["rgb"], batch["indices"], batch["image_size"])
         if self.training:
             loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
                 outputs["weights_list"], outputs["ray_samples_list"]

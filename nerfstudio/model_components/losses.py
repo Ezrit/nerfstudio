@@ -15,26 +15,45 @@
 """
 Collection of Losses.
 """
+import typing
 from enum import Enum
 
 import torch
 from torch import nn
+from torch.nn.modules.loss import _Loss
 from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RaySamples
 
 
-def weighted_mse_loss(input, target, weight, reduction='mean'):
-    if reduction == 'mean':
-        return torch.mean(weight * (input - target) ** 2)
-    return torch.sum(weight * (input - target) ** 2)
+class PolarWeightedLoss(_Loss):
+    __constants__ = ['reduction']
+
+    def __init__(self, inner_loss_function=nn.MSELoss, size_average=None, reduce=None, reduction: str = 'mean') -> None:
+        super(PolarWeightedLoss, self).__init__(size_average, reduce, reduction)
+        self.inner_loss_function = inner_loss_function(reduction='none')
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor, indices: torch.Tensor, image_shape: typing.Tuple[int, int]) -> torch.Tensor:
+        inner_loss = self.inner_loss_function(input, target)
+
+        percental_height = indices[:, 1].type('torch.FloatTensor').to(input.device).view(-1, 1) / image_shape[0]
+        weight = torch.sin(torch.pi * percental_height)
+
+        unreduced_loss = weight * inner_loss
+        if self.reduction == 'mean':
+            return torch.mean(unreduced_loss)
+        if self.reduction == 'sum':
+            return torch.sum(unreduced_loss)
+        assert(self.reduction == 'none')
+        return unreduced_loss
 
 
 L1Loss = nn.L1Loss
 MSELoss = nn.MSELoss
-MSEWLoss = weighted_mse_loss
+PolarLoss = PolarWeightedLoss
 
-LOSSES = {"L1": L1Loss, "MSE": MSELoss, 'MSEW': MSEWLoss}
+
+LOSSES = {"L1": L1Loss, "MSE": MSELoss, 'Polar': PolarWeightedLoss}
 
 EPS = 1.0e-7
 
