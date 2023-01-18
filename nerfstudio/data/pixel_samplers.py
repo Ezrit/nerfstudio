@@ -109,6 +109,9 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
         if keep_full_image:
             collated_batch["full_image"] = batch["image"]
 
+        # add height and width to the batch...
+        collated_batch["image_size"] = (image_height, image_width)
+
         return collated_batch
 
     def collate_image_dataset_batch_list(self, batch: Dict, num_rays_per_batch: int, keep_full_image: bool = False):
@@ -179,6 +182,9 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
 
         if keep_full_image:
             collated_batch["full_image"] = batch["image"]
+
+        # add height and width to the batch...
+        collated_batch["image_size"] = (image_height, image_width)
 
         return collated_batch
 
