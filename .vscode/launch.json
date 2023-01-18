@@ -38,6 +38,25 @@
         "--logging.event-writer=wandb"
       ]
     },
+     {
+      "name": "Python: nii-nerfstudio",
+      "type": "python",
+      "request": "launch",
+      "program": "scripts/train.py",
+      "console": "integratedTerminal",
+      "args": [
+        "nii-nerfacto",
+        "--output-dir",
+        "/home/moritz/Dataset/dump",
+        "--data",
+        "/home/moritz/Dataset/Metashape/4_Takadanobaba_Streetview/",
+        "--viewer.skip-openrelay",
+        "True",
+        "metashape-data",
+        "--direction",
+        "4",
+      ]
+    },
     {
       "name": "Python: train ngp",
       "type": "python",
