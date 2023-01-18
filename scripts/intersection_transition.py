@@ -175,20 +175,20 @@ def get_nerf_transform(load_config_path: pathlib.Path) -> typing.Tuple[Pipeline,
 
 def get_intersection_point(start_transforms: torch.Tensor, target_transforms: torch.Tensor, degree: int = 1) -> np.ndarray:
     # get polynomial of start_transforms
-    start_x: np.ndarray = start_transforms[:, 0].numpy()
-    start_y: np.ndarray = start_transforms[:, 2].numpy()
-    start_polynomial: np.polynomial.Polynomial = np.polynomial.Polynomial.fit(start_x, start_y, degree)
+    start_x: np.ndarray = start_transforms[:, 0, 3].numpy()
+    start_y: np.ndarray = start_transforms[:, 2, 3].numpy()
+    start_polynomial: np.polynomial.Polynomial = np.polynomial.Polynomial.fit(start_x, start_y, degree, domain=[-1, 1])
 
     # get polynomial of target_transforms
-    target_x: np.ndarray = target_transforms[:, 0].numpy()
-    target_y: np.ndarray = target_transforms[:, 2].numpy()
-    target_polynomial: np.polynomial.Polynomial = np.polynomial.Polynomial.fit(target_x, target_y, degree)
+    target_x: np.ndarray = target_transforms[:, 0, 3].numpy()
+    target_y: np.ndarray = target_transforms[:, 2, 3].numpy()
+    target_polynomial: np.polynomial.Polynomial = np.polynomial.Polynomial.fit(target_x, target_y, degree, domain=[-1, 1])
 
     # get intersection (should only be 1 with degree 1 at least..., so just use the first for now)
     intersection_x: float = (start_polynomial - target_polynomial).roots()[0]
     intersection_y: float = start_polynomial(intersection_x)
 
-    intersection_z: float = float((np.mean(start_transforms[:, 1].numpy()) + np.mean(target_transforms[:, 1].numpy())) / 2.0)
+    intersection_z: float = float((np.mean(start_transforms[:, 1, 3].numpy()) + np.mean(target_transforms[:, 1, 3].numpy())) / 2.0)
     intersection_point: np.ndarray = np.array([intersection_x, intersection_z, intersection_y])
 
     return intersection_point
@@ -417,6 +417,7 @@ class IntersectionTransition:
     output_config: OutputConfig
     interpolate_direction: int = 0
     """Determines the corner point for the inteprolation"""
+    start_end_frames: typing.Tuple[int, int] = (0, -1)
 
     def main(self) -> None:
         now = datetime.datetime.now()
@@ -453,7 +454,7 @@ class IntersectionTransition:
         """
 
         # get leading and ending frames if any
-        leading_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.starting_data.group_id), (0, self.starting_data.transition[0]), self.output_config.image_resolution)
+        leading_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.starting_data.group_id), (self.start_end_frames[0], self.starting_data.transition[0]), self.output_config.image_resolution)
         leading_transition_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.starting_data.group_id), (self.starting_data.transition[0], self.starting_data.transition[1]), self.output_config.image_resolution)
 
         cameras_starting_transition: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(start_nerf_transform, start_transforms))
@@ -465,14 +466,14 @@ class IntersectionTransition:
         del start_nerf_pipeline, start_nerf_transform
         target_nerf_pipeline, target_nerf_transform = get_nerf_transform(self.targeting_data.nerf_config)
 
+        ending_transition_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.targeting_data.group_id), (self.targeting_data.transition[0], self.targeting_data.transition[1]), self.output_config.image_resolution)
+        ending_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.targeting_data.group_id), (self.targeting_data.transition[1], self.start_end_frames[1]), self.output_config.image_resolution)
+
         cameras_targeting_path: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(target_nerf_transform, between_transforms))
         targeting_path_frames: typing.List[np.ndarray] = render_trajectory_frames(target_nerf_pipeline, cameras_targeting_path, "rgb")
 
         cameras_targeting_transition: Cameras = get_cameras(self.output_config.image_resolution, torch.matmul(target_nerf_transform, target_transforms))
         targeting_transition_frames: typing.List[np.ndarray] = render_trajectory_frames(target_nerf_pipeline, cameras_targeting_transition, "rgb")
-
-        ending_transition_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.targeting_data.group_id), (self.targeting_data.transition[0], self.targeting_data.transition[1]), self.output_config.image_resolution)
-        ending_frames: typing.List[np.ndarray] = get_data_frames(xml_handler.getGroupImagesPath(self.targeting_data.group_id), (self.targeting_data.transition[1], -1), self.output_config.image_resolution)
 
         del target_nerf_pipeline, target_nerf_transform
 
