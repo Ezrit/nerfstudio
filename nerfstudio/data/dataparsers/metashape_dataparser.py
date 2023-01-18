@@ -61,52 +61,6 @@ CAMERA_MODEL_TO_TYPE = {
 }
 
 
-def get_weights_and_masks(image_idx: int, alpha_threshold: float, weighting_type: WeightingType, filenames: List[Path]):
-    """function to process additional weighting and mask information
-
-    Args:
-        image_idx: specific image index to work with
-        alpha_threshold: masking threshold, every pixel with alpha lower than this will be masked
-        weighting_type: weigthing type for images
-        filenames: List of all filenames, to read the mask 
-    """
-    # nothing to do if threshold is 0 or less and weighting type is uniform -> dont read the image again! 
-    if alpha_threshold <= 0.0 and weighting_type == WeightingType.UNIFORM:
-        return
-
-    # read the mask
-    image_filename = filenames[image_idx]
-    pil_alpha = Image.open(image_filename)
-    alpha = np.array(pil_alpha, dtype="uint8")  # shape is (h, w)
-    if len(alpha.shape) == 3:
-        alpha = alpha[:, :, 0]
-    alpha = alpha[..., np.newaxis]
-    assert len(alpha.shape) == 3
-    assert alpha.dtype == np.uint8
-    alpha = torch.from_numpy(alpha.astype("float32") / 255.0)
-
-    additional_data = {}
-    # add "mask" to data and mask all pixels with alpha < threshold
-    if alpha_threshold > 0.0:
-        mask = torch.ones_like(alpha)
-        mask[alpha < alpha_threshold] = 0
-        additional_data["mask"] = mask
-
-    # add "weight" to data for weighted MSE Loss depending on weighting type selected
-    if weighting_type == WeightingType.ALPHA:
-        additional_data["weight"] = alpha
-        # additional_data["probability"] = alpha
-    elif weighting_type == WeightingType.POLAR:
-        weights = torch.sin((torch.arange(alpha.shape[0], dtype=torch.float32).view(-1, 1, 1) + 0.5) / alpha.shape[0] * pi)
-        additional_data["weight"] = weights.repeat(1, alpha.shape[1], 1)
-        # additional_data["probability"] = weights.repeat(1, alpha.shape[1], 1)
-    elif weighting_type == WeightingType.ALPHA_POLAR:
-        weights = torch.sin((torch.arange(alpha.shape[0], dtype=torch.float32).view(-1, 1, 1) + 0.5) / alpha.shape[0] * pi)
-        additional_data["weight"] = weights.repeat(1, alpha.shape[1], 1) * alpha
-        # additional_data["probability"] = weights.repeat(1, alpha.shape[1], 1) * alpha
-    return additional_data
-
-
 @dataclass
 class MetashapeDataParserConfig(DataParserConfig):
     """Metashape dataset config"""
@@ -240,14 +194,9 @@ class Metashape(DataParser):
             distortion_params=distortion_params,
             camera_to_worlds=poses[:, :3, :4],
             camera_type=CameraType.EQUIRECTANGULAR,
-            # camera_type=CameraType.PANORAMA,
         )
 
         alpha_color_tensor = get_color("green")
-
-        #add_inputs = {}
-        #add_inputs["weights_and_mask"] = {"func": get_weights_and_masks, "kwargs": {"alpha_threshold": self.config.alpha_threshold, "weighting_type": self.config.weighting, "filenames": msk_filenames}}
-        #additional_inputs=add_inputs
 
         dataparser_outputs = DataparserOutputs(
             image_filenames=img_filenames,
