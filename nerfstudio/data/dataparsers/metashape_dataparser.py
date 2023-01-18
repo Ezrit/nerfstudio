@@ -197,8 +197,8 @@ class Metashape(DataParser):
             # poses = [poses[i] for i in sampled_indices] this needs to be done after auto_orient_poses, so the final world coordinate system doesnt change every time
             
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
-        self.transform = camera_utils.auto_orient_poses_transform(poses, method=self.config.orientation_method)
-        poses = camera_utils.auto_orient_poses(poses, method=self.config.orientation_method)
+        poses, self.transform = camera_utils.auto_orient_and_center_poses(poses, method=self.config.orientation_method)
+        self.transform = torch.cat((self.transform, torch.tensor([[0, 0, 0, 1]])), 0)
         poses = poses[sampled_indices, ...]
 
         # Scale poses
@@ -239,19 +239,21 @@ class Metashape(DataParser):
             width=int(width),
             distortion_params=distortion_params,
             camera_to_worlds=poses[:, :3, :4],
-            camera_type=CameraType.PANORAMA,
+            camera_type=CameraType.EQUIRECTANGULAR,
+            # camera_type=CameraType.PANORAMA,
         )
 
         alpha_color_tensor = get_color("green")
 
-        add_inputs = {}
-        add_inputs["weights_and_mask"] = {"func": get_weights_and_masks, "kwargs": {"alpha_threshold": self.config.alpha_threshold, "weighting_type": self.config.weighting, "filenames": msk_filenames}}
+        #add_inputs = {}
+        #add_inputs["weights_and_mask"] = {"func": get_weights_and_masks, "kwargs": {"alpha_threshold": self.config.alpha_threshold, "weighting_type": self.config.weighting, "filenames": msk_filenames}}
+        #additional_inputs=add_inputs
 
         dataparser_outputs = DataparserOutputs(
             image_filenames=img_filenames,
             cameras=cameras,
             scene_box=scene_box,
+            dataparser_transform=self.transform,
             alpha_color=alpha_color_tensor,
-            additional_inputs=add_inputs
         )
         return dataparser_outputs

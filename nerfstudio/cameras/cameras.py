@@ -48,7 +48,7 @@ CAMERA_MODEL_TO_TYPE = {
     "RADIAL": CameraType.PERSPECTIVE,
     "OPENCV": CameraType.PERSPECTIVE,
     "OPENCV_FISHEYE": CameraType.FISHEYE,
-    "OMNIDIRECTIONAL": CameraType.PANORAMA
+    "OMNIDIRECTIONAL": CameraType.PANORAMA,
     "EQUIRECTANGULAR": CameraType.EQUIRECTANGULAR,
 }
 
@@ -675,7 +675,7 @@ class Cameras(TensorDataclass):
             directions_stack[..., 2][mask] = torch.masked_select(-torch.cos(theta) * torch.sin(phi), mask).float()
 
         for value in cam_types:
-            if value not in [CameraType.PERSPECTIVE.value, CameraType.FISHEYE.value, CameraType.EQUIRECTANGULAR.value]:
+            if value not in [CameraType.PERSPECTIVE.value, CameraType.FISHEYE.value, CameraType.EQUIRECTANGULAR.value, CameraType.PANORAMA.value]:
                 raise ValueError(f"Camera type {value} not supported.")
 
         assert directions_stack.shape == (3,) + num_rays_shape + (3,)
