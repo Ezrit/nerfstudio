@@ -39,6 +39,29 @@
       ]
     },
      {
+      "name": "Python: nerf-registration",
+      "type": "python",
+      "request": "launch",
+      "program": "scripts/train.py",
+      "console": "integratedTerminal",
+      "args": [
+        "nerf-registration",
+        "--output-dir",
+        "/home/moritz/Dataset/dump",
+        "--data",
+        "/home/moritz/Dataset/Metashape/4_Takadanobaba_Streetview/Streetview_Split/0_Crossing_1x2",
+        "--pipeline.model.main-method-config",
+        "/home/moritz/Dataset/dump/-home-moritz-Dataset-Metashape-4_Takadanobaba_Streetview-Streetview_Split-0_Crossing_1x2/nii-nerfacto/2023-01-25_160019/config.yml",
+        "--pipeline.model.sub-method-config",
+        "/home/moritz/Dataset/dump/-home-moritz-Dataset-Metashape-4_Takadanobaba_Streetview-Streetview_Split-0_Crossing_1x2/nii-nerfacto/2023-01-25_161734/config.yml",
+        "--vis",
+        "wandb",
+        "metashape-data",
+        "--direction",
+        "0",
+      ]
+    },
+     {
       "name": "Python: nii-nerfstudio",
       "type": "python",
       "request": "launch",
@@ -49,12 +72,12 @@
         "--output-dir",
         "/home/moritz/Dataset/dump",
         "--data",
-        "/home/moritz/Dataset/Metashape/4_Takadanobaba_Streetview/",
+        "/home/moritz/Dataset/Metashape/4_Takadanobaba_Streetview/Streetview_Split/0_Crossing_1x2",
         "--viewer.skip-openrelay",
         "True",
         "metashape-data",
         "--direction",
-        "4",
+        "1",
       ]
     },
     {
