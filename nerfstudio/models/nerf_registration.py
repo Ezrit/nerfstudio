@@ -16,6 +16,7 @@ from torch.nn import Parameter
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.engine.trainer import TrainerConfig
@@ -75,8 +76,9 @@ def load_model_from_config(
 
     # setup pipeline (which includes the DataManager)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pipeline = config.pipeline.setup(device=device, test_mode=None)
+    pipeline = config.pipeline.setup(device=device, test_mode="inference")
     assert isinstance(pipeline, Pipeline)
+    pipeline.requires_grad_(False)
 
     # load checkpointed information
     _ = load_checkpoint(config, pipeline)
@@ -86,21 +88,25 @@ def load_model_from_config(
 
 
 def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
-    # Normalize the quaternion
-    quaternion = quaternion/torch.norm(quaternion)
-    # Unpack the quaternion
-    w, x, y, z = quaternion
+    # Normalize and unpack the quaternion
+    qw, qx, qy, qz = quaternion / torch.norm(quaternion)
+
     # Compute the rotation matrix
-    r00 = 1 - 2*y*y - 2*z*z
-    r01 = 2*x*y - 2*w*z
-    r02 = 2*x*z + 2*w*y
-    r10 = 2*x*y + 2*w*z
-    r11 = 1 - 2*x*x - 2*z*z
-    r12 = 2*y*z - 2*w*x
-    r20 = 2*x*z - 2*w*y
-    r21 = 2*y*z + 2*w*x
-    r22 = 1 - 2*x*x - 2*y*y
-    return torch.tensor([[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]], dtype=quaternion.dtype, device=quaternion.device)
+    matrix = torch.zeros((3, 3), device=quaternion.device)
+
+    matrix[0, 0] = 1. - 2. * qy ** 2 - 2. * qz ** 2
+    matrix[1, 1] = 1. - 2. * qx ** 2 - 2. * qz ** 2
+    matrix[2, 2] = 1. - 2. * qx ** 2 - 2. * qy ** 2
+
+    matrix[0, 1] = 2. * qx * qy - 2. * qz * qw
+    matrix[1, 0] = 2. * qx * qy + 2. * qz * qw
+
+    matrix[0, 2] = 2. * qx * qz + 2 * qy * qw
+    matrix[2, 0] = 2. * qx * qz - 2 * qy * qw
+
+    matrix[1, 2] = 2. * qy * qz - 2. * qx * qw
+    matrix[2, 1] = 2. * qy * qz + 2. * qx * qw
+    return matrix
 
 
 @dataclass
@@ -110,18 +116,14 @@ class NerfRegistrationConfig(ModelConfig):
     _target: Type = field(default_factory=lambda: NerfRegistrationModel)
     main_method_config: Path = Path()
     """main model which defines the world coordinates"""
-    main_method_name: Optional[str] = None
-    """main model which defines the world coordinates"""
-    main_load_dir: Optional[Path] = None
-    """Specify a pre-trained model directory to load from."""
-    main_load_step: Optional[Path] = None
     sub_method_config: Path = Path()
     """sub to align to the main model"""
-    sub_method_name: Optional[str] = None
-    """model to align to the main model"""
-    sub_load_dir: Optional[Path] = None
-    """Specify a pre-trained model directory to load from."""
-    sub_load_step: Optional[Path] = None
+    fake_translation: TensorType[3] = torch.Tensor(0, 0, 0)
+    """fake translation to test to train"""
+    fake_scaling: TensorType[3] = torch.Tensor(0, 0, 0)
+    """fake scaling to test to train"""
+    fake_rotation: TensorType[4] = torch.Tensor(1, 0, 0, 0)
+    """fake rotation to test to train"""
 
 
 class NerfRegistrationModel(Model):
@@ -145,10 +147,13 @@ class NerfRegistrationModel(Model):
         self.scale = torch.nn.Parameter(torch.ones(3))
         self.scale.requires_grad_(True)
 
+        self.config.fake_translation.to(self.device)
+        self.config.fake_scaling.to(self.device)
+        self.config.fake_rotation.to(self.device)
+
         # load and fix main model
         self.main_model = load_model_from_config(self.config.main_method_config)
         self.main_model.requires_grad_(False)
-        self.main_model.
 
         # load and fix sub model
         self.sub_model = load_model_from_config(self.config.sub_method_config)
@@ -164,8 +169,8 @@ class NerfRegistrationModel(Model):
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = {}
-        # TODO:????
-        # param_groups["translation"] = list(self.translate.parameters())
+        # TODO: still a bit confused by this...
+        param_groups["transform"] = [self.translate, self.rotation, self.scale]
         return param_groups
 
     def get_outputs(self, ray_bundle: RayBundle):
@@ -177,18 +182,25 @@ class NerfRegistrationModel(Model):
 
         # apply the current transformation to ray bundle
         transform = torch.eye(4, device=self.device)
-        scale = torch.diag(self.scale)
-        rotation = quaternion_to_rotation_matrix(self.rotation)
-        scale_rotate = scale @ rotation
-        transform[:3, :3] = scale_rotate
-        transform[:3, 3] = self.translate
+        # first apply fake transforms
+        # TODO: remove this, it is just to test the method
+        fake_scaling = torch.diag(self.config.fake_scaling)
+        fake_rotation = quaternion_to_rotation_matrix(self.config.fake_rotation)
+        transform[:3, :3] = fake_scaling @ fake_rotation @ transform[:3, :3]
+        transform[:3, 3] = self.config.fake_translation + transform[:3, 3]
 
+        # apply learned transform
+        scaling = torch.diag(self.scale)
+        rotation = quaternion_to_rotation_matrix(self.rotation)
+        transform[:3, :3] = scaling @ rotation @ transform[:3, :3]
+        transform[:3, 3] = self.translate + transform[:3, 3]
+
+        # apply the transformation matrix to the rays origins and directions
         ray_bundle.origins = torch.matmul(transform, torch.cat([ray_bundle.origins, torch.ones((*ray_bundle.origins.shape[:-1], 1), dtype=ray_bundle.origins.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
         ray_bundle.directions = torch.matmul(transform, torch.cat([ray_bundle.directions, torch.zeros((*ray_bundle.directions.shape[:-1], 1), dtype=ray_bundle.directions.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
 
         # get sub output
-        with torch.no_grad():
-            sub_outputs = self.sub_model(ray_bundle)
+        sub_outputs = self.sub_model(ray_bundle)
 
         outputs = {f"main_{key}": value for key, value in main_outputs.items()}
         outputs.update({f"sub_{key}": value for key, value in sub_outputs.items()})

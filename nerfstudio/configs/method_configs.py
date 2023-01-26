@@ -73,7 +73,8 @@ descriptions = {
 
 method_configs["nerf-registration"] = TrainerConfig(
     method_name="nerf-registration",
-    steps_per_eval_batch=500,
+    steps_per_eval_batch=50,
+    steps_per_eval_image=50,
     steps_per_save=2000,
     max_num_iterations=30000,
     mixed_precision=True,
@@ -89,17 +90,13 @@ method_configs["nerf-registration"] = TrainerConfig(
         model=NerfRegistrationConfig(eval_num_rays_per_chunk=1 << 15),
     ),
     optimizers={
-        "proposal_networks": {
-            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": None,
-        },
-        "fields": {
+        "transform": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
             "scheduler": None,
         },
     },
     viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
-    vis="viewer",
+    vis="wandb",
 )
 
 method_configs["nii-nerfacto"] = TrainerConfig(
