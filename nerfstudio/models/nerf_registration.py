@@ -118,11 +118,11 @@ class NerfRegistrationConfig(ModelConfig):
     """main model which defines the world coordinates"""
     sub_method_config: Path = Path()
     """sub to align to the main model"""
-    fake_translation: TensorType[3] = torch.Tensor(0, 0, 0)
+    fake_translation: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     """fake translation to test to train"""
-    fake_scaling: TensorType[3] = torch.Tensor(0, 0, 0)
+    fake_scaling: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     """fake scaling to test to train"""
-    fake_rotation: TensorType[4] = torch.Tensor(1, 0, 0, 0)
+    fake_rotation: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
     """fake rotation to test to train"""
 
 
@@ -147,9 +147,9 @@ class NerfRegistrationModel(Model):
         self.scale = torch.nn.Parameter(torch.ones(3))
         self.scale.requires_grad_(True)
 
-        self.config.fake_translation.to(self.device)
-        self.config.fake_scaling.to(self.device)
-        self.config.fake_rotation.to(self.device)
+        self.fake_translation = torch.nn.Parameter(torch.tensor(self.config.fake_translation))
+        self.fake_scaling = torch.nn.Parameter(torch.tensor(self.config.fake_scaling))
+        self.fake_rotation = torch.nn.Parameter(torch.tensor(self.config.fake_rotation))
 
         # load and fix main model
         self.main_model = load_model_from_config(self.config.main_method_config)
@@ -184,10 +184,10 @@ class NerfRegistrationModel(Model):
         transform = torch.eye(4, device=self.device)
         # first apply fake transforms
         # TODO: remove this, it is just to test the method
-        fake_scaling = torch.diag(self.config.fake_scaling)
-        fake_rotation = quaternion_to_rotation_matrix(self.config.fake_rotation)
+        fake_scaling = torch.diag(self.fake_scaling)
+        fake_rotation = quaternion_to_rotation_matrix(self.fake_rotation)
         transform[:3, :3] = fake_scaling @ fake_rotation @ transform[:3, :3]
-        transform[:3, 3] = self.config.fake_translation + transform[:3, 3]
+        transform[:3, 3] = self.fake_translation + transform[:3, 3]
 
         # apply learned transform
         scaling = torch.diag(self.scale)
@@ -206,6 +206,24 @@ class NerfRegistrationModel(Model):
         outputs.update({f"sub_{key}": value for key, value in sub_outputs.items()})
 
         return outputs
+
+    def get_metrics_dict(self, outputs, batch) -> Dict[str, torch.Tensor]:
+        metrics_dict = {}
+
+        metrics_dict["translation_x"] = float(self.translate[0])
+        metrics_dict["translation_y"] = float(self.translate[1])
+        metrics_dict["translation_z"] = float(self.translate[2])
+
+        metrics_dict["rotation_w"] = float(self.rotation[0])
+        metrics_dict["rotation_x"] = float(self.rotation[1])
+        metrics_dict["rotation_y"] = float(self.rotation[2])
+        metrics_dict["rotation_z"] = float(self.rotation[3])
+
+        metrics_dict["scale_x"] = float(self.scale[0])
+        metrics_dict["scale_y"] = float(self.scale[1])
+        metrics_dict["scale_z"] = float(self.scale[2])
+
+        return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
         loss_dict = {}

@@ -73,8 +73,8 @@ descriptions = {
 
 method_configs["nerf-registration"] = TrainerConfig(
     method_name="nerf-registration",
-    steps_per_eval_batch=50,
-    steps_per_eval_image=50,
+    steps_per_eval_batch=500,
+    steps_per_eval_image=500,
     steps_per_save=2000,
     max_num_iterations=30000,
     mixed_precision=True,
