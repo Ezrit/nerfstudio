@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Type
 
+import numpy as np
 import torch
+import wandb
 import yaml
 from torch.nn import Parameter
 from torchmetrics import PeakSignalNoiseRatio
@@ -19,6 +21,11 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RayBundle
+from nerfstudio.engine.callbacks import (
+    TrainingCallback,
+    TrainingCallbackAttributes,
+    TrainingCallbackLocation,
+)
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.model_components.losses import MSELoss
 from nerfstudio.models.base_model import Model, ModelConfig
@@ -109,6 +116,57 @@ def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
     return matrix
 
 
+# last_ray_origins = torch.tensor(torch.zeros(3))
+# last_ray_directions = torch.tensor(torch.zeros(3))
+
+# #def log_wand_3d_nerf_box(translation: TensorType[3], rotation: TensorType[4], scaling: TensorType[3], ray_origins: Optional[TensorType[..., 3]], ray_directions: Optional[TensorType[..., 3]], step: int) -> None:
+# def log_wand_3d_nerf_box(translation: TensorType[3], rotation: TensorType[4], scaling: TensorType[3], step: int) -> None:
+#     boxes = []
+#     points = []
+#     device = translation.device
+
+#     # create main nerf box
+#     main_box_points: torch.Tensor = torch.tensor([[[i], [j], [k]] for i in [-1.0, 1.0] for j in [-1.0, 1.0] for k in [-1.0, 1.0]], device=device)
+#     main_box = {
+#         "corners": main_box_points[:, :, 0].tolist(),
+#         # optionally customize each label
+#         "label": "main NeRF",
+#         "color": [0, 255, 0],
+#     }
+#     points.append(main_box_points.tolist())
+#     boxes.append(main_box)
+
+#     # create sub nerf box
+#     transformation: torch.Tensor = (scaling[0] * torch.eye(3, device=device)) @ quaternion_to_rotation_matrix(rotation)
+#     sub_box_points = torch.matmul(transformation, main_box_points) + translation
+#     sub_box = {
+#         "corners": sub_box_points[:, :, 0].tolist(),
+#         # optionally customize each label
+#         "label": "sub NeRF",
+#         "color": [255, 255, 0],
+#     }
+#     points.append(sub_box_points.tolist())
+#     boxes.append(sub_box)
+
+#     boxes = np.array(boxes)
+
+#     if last_ray_origins is not None:
+#         points.append(last_ray_origins.tolist())
+#     points = np.array(points)
+
+#     wandb.log(
+#         {
+#             "NeRF Boxes": wandb.Object3D(
+#                 {
+#                     "type": "lidar/beta",
+#                     "points": points,
+#                     "boxes": boxes,
+#                 }
+#             )
+#         }, step=step
+#     )
+
+
 @dataclass
 class NerfRegistrationConfig(ModelConfig):
     """Nerf Registration Config"""
@@ -134,6 +192,65 @@ class NerfRegistrationModel(Model):
     """
 
     config: NerfRegistrationConfig
+
+    def log_wand_3d_nerf_box(self, step: int) -> None:
+        boxes = []
+        points = []
+
+        # create main nerf box
+        main_box_points: torch.Tensor = torch.tensor([[[i], [j], [k]] for i in [-1.0, 1.0] for j in [-1.0, 1.0] for k in [-1.0, 1.0]], device=self.device)
+        main_box = {
+            "corners": main_box_points[:, :, 0].tolist(),
+            # optionally customize each label
+            "label": "main NeRF",
+            "color": [0, 255, 0],
+        }
+        points.append(main_box_points.tolist())
+        boxes.append(main_box)
+
+        # create sub nerf box
+        transformation: torch.Tensor = (self.scale[0] * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.rotation)
+        sub_box_points = torch.matmul(transformation, main_box_points) + self.translate
+        sub_box = {
+            "corners": sub_box_points[:, :, 0].tolist(),
+            # optionally customize each label
+            "label": "sub NeRF",
+            "color": [255, 255, 0],
+        }
+        points.append(sub_box_points.tolist())
+        boxes.append(sub_box)
+
+        # if self.last_ray_origins is not None:
+        #     points.append(self.last_ray_origins.tolist())
+
+        boxes = np.array(boxes)
+        points = np.array(points)
+
+        wandb.log(
+            {
+                "NeRF Boxes": wandb.Object3D(
+                    {
+                        "type": "lidar/beta",
+                        "points": points,
+                        "boxes": boxes,
+                    }
+                )
+            }, step=step
+        )
+
+    def get_training_callbacks(self, training_callback_attributes: TrainingCallbackAttributes) -> List[TrainingCallback]:
+        callbacks: List[TrainingCallback] = []
+        if wandb.run is not None:
+            callbacks.append(
+                TrainingCallback(
+                    where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                    update_every_num_iters=1,
+                    func=self.log_wand_3d_nerf_box,
+                    #args=[self.translate, self.rotation, self.scale, self.last_ray_origins, self.last_ray_directions],
+                    #args=[self.translate, self.rotation, self.scale],
+                )
+            )
+        return callbacks
 
     def populate_modules(self):
         """Set the fields and modules"""
@@ -162,6 +279,9 @@ class NerfRegistrationModel(Model):
         # losses
         self.rgb_loss = MSELoss()
 
+        self.last_ray_origins: Optional[TensorType[..., 3]] = None
+        self.last_ray_directions: Optional[TensorType[..., 3]] = None
+
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
         self.ssim = structural_similarity_index_measure
@@ -176,6 +296,11 @@ class NerfRegistrationModel(Model):
     def get_outputs(self, ray_bundle: RayBundle):
         outputs = {}
 
+        # save the new origins and directions for wandb visualization
+        if wandb.run is not None:
+            self.last_ray_origins = ray_bundle.origins
+            self.last_ray_directions = ray_bundle.directions
+
         # get main output
         with torch.no_grad():
             main_outputs = self.main_model(ray_bundle)
@@ -184,13 +309,14 @@ class NerfRegistrationModel(Model):
         transform = torch.eye(4, device=self.device)
         # first apply fake transforms
         # TODO: remove this, it is just to test the method
-        fake_scaling = torch.diag(self.fake_scaling)
+        fake_scaling = self.fake_scaling[0] * torch.eye(3, device=self.device)
         fake_rotation = quaternion_to_rotation_matrix(self.fake_rotation)
         transform[:3, :3] = fake_scaling @ fake_rotation @ transform[:3, :3]
         transform[:3, 3] = self.fake_translation + transform[:3, 3]
 
         # apply learned transform
-        scaling = torch.diag(self.scale)
+        # scaling = self.scale[0] * torch.eye(3, device=self.device)
+        scaling = torch.eye(3, device=self.device)
         rotation = quaternion_to_rotation_matrix(self.rotation)
         transform[:3, :3] = scaling @ rotation @ transform[:3, :3]
         transform[:3, 3] = self.translate + transform[:3, 3]
