@@ -116,57 +116,6 @@ def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
     return matrix
 
 
-# last_ray_origins = torch.tensor(torch.zeros(3))
-# last_ray_directions = torch.tensor(torch.zeros(3))
-
-# #def log_wand_3d_nerf_box(translation: TensorType[3], rotation: TensorType[4], scaling: TensorType[3], ray_origins: Optional[TensorType[..., 3]], ray_directions: Optional[TensorType[..., 3]], step: int) -> None:
-# def log_wand_3d_nerf_box(translation: TensorType[3], rotation: TensorType[4], scaling: TensorType[3], step: int) -> None:
-#     boxes = []
-#     points = []
-#     device = translation.device
-
-#     # create main nerf box
-#     main_box_points: torch.Tensor = torch.tensor([[[i], [j], [k]] for i in [-1.0, 1.0] for j in [-1.0, 1.0] for k in [-1.0, 1.0]], device=device)
-#     main_box = {
-#         "corners": main_box_points[:, :, 0].tolist(),
-#         # optionally customize each label
-#         "label": "main NeRF",
-#         "color": [0, 255, 0],
-#     }
-#     points.append(main_box_points.tolist())
-#     boxes.append(main_box)
-
-#     # create sub nerf box
-#     transformation: torch.Tensor = (scaling[0] * torch.eye(3, device=device)) @ quaternion_to_rotation_matrix(rotation)
-#     sub_box_points = torch.matmul(transformation, main_box_points) + translation
-#     sub_box = {
-#         "corners": sub_box_points[:, :, 0].tolist(),
-#         # optionally customize each label
-#         "label": "sub NeRF",
-#         "color": [255, 255, 0],
-#     }
-#     points.append(sub_box_points.tolist())
-#     boxes.append(sub_box)
-
-#     boxes = np.array(boxes)
-
-#     if last_ray_origins is not None:
-#         points.append(last_ray_origins.tolist())
-#     points = np.array(points)
-
-#     wandb.log(
-#         {
-#             "NeRF Boxes": wandb.Object3D(
-#                 {
-#                     "type": "lidar/beta",
-#                     "points": points,
-#                     "boxes": boxes,
-#                 }
-#             )
-#         }, step=step
-#     )
-
-
 @dataclass
 class NerfRegistrationConfig(ModelConfig):
     """Nerf Registration Config"""
@@ -193,38 +142,87 @@ class NerfRegistrationModel(Model):
 
     config: NerfRegistrationConfig
 
-    def log_wand_3d_nerf_box(self, step: int) -> None:
+    def log_wand_3d_nerf_box(self, number_ray_vis: int, coordinate_system_length: float, ray_length: float,  step: int) -> None:
         boxes = []
         points = []
+        vectors = []
 
         # create main nerf box
-        main_box_points: torch.Tensor = torch.tensor([[[i], [j], [k]] for i in [-1.0, 1.0] for j in [-1.0, 1.0] for k in [-1.0, 1.0]], device=self.device)
+        main_box_points: TensorType[8, 4, 1] = torch.tensor([[[i], [j], [k], [1]] for i in [-1.0, 1.0] for j in [-1.0, 1.0] for k in [-1.0, 1.0]], device=self.device)
         main_box = {
-            "corners": main_box_points[:, :, 0].tolist(),
+            "corners": main_box_points[:, :3, 0].tolist(),
             # optionally customize each label
             "label": "main NeRF",
             "color": [0, 255, 0],
         }
-        points.append(main_box_points.tolist())
+        main_box_points_render = torch.clone(main_box_points[:, :, 0])
+        main_box_points_render[:, 3] = 0
+        points += main_box_points_render.tolist()
         boxes.append(main_box)
 
+        # visualize coordinate system of main nerf box
+        coordinate_origin_main: TensorType[1, 4, 1] = torch.tensor([[[0], [0], [0], [1]]], dtype=torch.float, device=self.device)
+        coordinate_directions_main: TensorType[3, 4, 1] = torch.tensor([[[1], [0], [0], [0]], [[0], [1], [0], [0]], [[0], [0], [1], [0]]], dtype=torch.float, device=self.device)
+        main_coord_vector = [{"start": coordinate_origin_main[0, :3, 0].tolist(), "end": (coordinate_origin_main[0, :3, 0] + coordinate_system_length * coordinate_directions_main[i, :3, 0]).tolist()} for i in range(3)]
+        vectors += main_coord_vector
+
         # create sub nerf box
-        transformation: torch.Tensor = (self.scale[0] * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.rotation)
-        sub_box_points = torch.matmul(transformation, main_box_points) + self.translate
+        # The transformation the network learns currently is a transformation from the main NeRF to the sub NeRF:
+        #   Ray origins and directions are created in the main NeRF coordinate sytem and then transformed to the sub NeRF coordinate system
+        #   Therefore, the translation is main -> sub!
+        # Since this visualization is in the main NeRF coordinate system, we need to inverse the transformation and apply it on the box points for the sub NeRF!
+
+        # compute inverse of fake transformation for computing the sub nerf box points
+        inv_fake_transformation: TensorType[4, 4] = torch.eye(4, device=self.device)
+        inv_fake_transformation[:3, :3] = ((1.0 / self.fake_scaling[0]) * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.fake_rotation).T
+        inv_fake_transformation[:3, 3] = -inv_fake_transformation[:3, :3] @ self.fake_translation
+
+        # compute inverse of the (currently) learned transformation for computing the sub nerf box points
+        inv_transformation: TensorType[4, 4] = torch.eye(4, device=self.device)
+        inv_transformation[:3, :3] = ((1.0 / self.scale[0]) * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.rotation).T
+        inv_transformation[:3, 3] = -inv_transformation[:3, :3] @ self.translate
+
+        # apply transformations
+        sub_box_points = torch.matmul(inv_fake_transformation @ inv_transformation, main_box_points)
         sub_box = {
-            "corners": sub_box_points[:, :, 0].tolist(),
+            "corners": sub_box_points[:, :3, 0].tolist(),
             # optionally customize each label
             "label": "sub NeRF",
             "color": [255, 255, 0],
         }
-        points.append(sub_box_points.tolist())
+        sub_box_points_render = torch.clone(sub_box_points[:, :, 0])
+        sub_box_points_render[:, 3] = 0
+        points += sub_box_points_render.tolist()
         boxes.append(sub_box)
 
-        # if self.last_ray_origins is not None:
-        #     points.append(self.last_ray_origins.tolist())
+        # visualize coordinate system of sub nerf box
+        coordinate_origin_sub: TensorType[1, 4, 1] = torch.matmul(inv_fake_transformation @ inv_transformation, coordinate_origin_main)
+        coordinate_directions_sub: TensorType[3, 4, 1] = torch.matmul(inv_fake_transformation @ inv_transformation, coordinate_directions_main)
+        sub_coord_vector = [{"start": coordinate_origin_sub[0, :3, 0].tolist(), "end": (coordinate_origin_sub[0, :3, 0] + coordinate_system_length * coordinate_directions_sub[i, :3, 0]).tolist()} for i in range(3)]
+        vectors += sub_coord_vector
+
+        # get the sub origin and assign a group value for rendering the points
+        current_sub_origin: TensorType[1, 4] = coordinate_origin_sub[:, :, 0]
+        current_sub_origin[0, 3] = 2
+        if self.all_sub_origins is not None:
+            self.all_sub_origins = torch.cat([self.all_sub_origins, current_sub_origin], 0)
+        else:
+            self.all_sub_origins = current_sub_origin
+        points += self.all_sub_origins.tolist()
+
+        # visiualize some rays used in the last step
+        if self.last_ray_origins is not None:
+            # visualize origin points
+            points += torch.cat([self.last_ray_origins[:number_ray_vis, :], torch.ones_like(self.last_ray_origins[:number_ray_vis, :1])], 1).tolist()
+            # visualize directions
+            if self.last_ray_directions is not None:
+                # TODO: this seems weird and wrong, maybe there is a more elegant way?
+                ray_vector = [{"start": self.last_ray_origins[i, :].tolist(), "end": (self.last_ray_origins[i, :] + ray_length * self.last_ray_directions[i, :]).tolist()} for i in range(number_ray_vis)]
+                vectors += ray_vector
 
         boxes = np.array(boxes)
         points = np.array(points)
+        vectors = np.array(vectors)
 
         wandb.log(
             {
@@ -233,6 +231,7 @@ class NerfRegistrationModel(Model):
                         "type": "lidar/beta",
                         "points": points,
                         "boxes": boxes,
+                        "vectors": vectors,
                     }
                 )
             }, step=step
@@ -244,10 +243,9 @@ class NerfRegistrationModel(Model):
             callbacks.append(
                 TrainingCallback(
                     where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
-                    update_every_num_iters=1,
+                    update_every_num_iters=50,
                     func=self.log_wand_3d_nerf_box,
-                    #args=[self.translate, self.rotation, self.scale, self.last_ray_origins, self.last_ray_directions],
-                    #args=[self.translate, self.rotation, self.scale],
+                    kwargs={"number_ray_vis": 100, "coordinate_system_length": 0.5, "ray_length": 0.1},
                 )
             )
         return callbacks
@@ -281,6 +279,7 @@ class NerfRegistrationModel(Model):
 
         self.last_ray_origins: Optional[TensorType[..., 3]] = None
         self.last_ray_directions: Optional[TensorType[..., 3]] = None
+        self.all_sub_origins: Optional[TensorType[..., 4]] = None
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
@@ -306,24 +305,24 @@ class NerfRegistrationModel(Model):
             main_outputs = self.main_model(ray_bundle)
 
         # apply the current transformation to ray bundle
-        transform = torch.eye(4, device=self.device)
         # first apply fake transforms
         # TODO: remove this, it is just to test the method
+        fake_transform = torch.eye(4, device=self.device)
         fake_scaling = self.fake_scaling[0] * torch.eye(3, device=self.device)
         fake_rotation = quaternion_to_rotation_matrix(self.fake_rotation)
-        transform[:3, :3] = fake_scaling @ fake_rotation @ transform[:3, :3]
-        transform[:3, 3] = self.fake_translation + transform[:3, 3]
+        fake_transform[:3, :3] = fake_scaling @ fake_rotation @ fake_transform[:3, :3]
+        fake_transform[:3, 3] = self.fake_translation + fake_transform[:3, 3]
 
         # apply learned transform
-        # scaling = self.scale[0] * torch.eye(3, device=self.device)
-        scaling = torch.eye(3, device=self.device)
+        transform = torch.eye(4, device=self.device)
+        scaling = self.scale[0] * torch.eye(3, device=self.device)
         rotation = quaternion_to_rotation_matrix(self.rotation)
         transform[:3, :3] = scaling @ rotation @ transform[:3, :3]
         transform[:3, 3] = self.translate + transform[:3, 3]
 
         # apply the transformation matrix to the rays origins and directions
-        ray_bundle.origins = torch.matmul(transform, torch.cat([ray_bundle.origins, torch.ones((*ray_bundle.origins.shape[:-1], 1), dtype=ray_bundle.origins.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
-        ray_bundle.directions = torch.matmul(transform, torch.cat([ray_bundle.directions, torch.zeros((*ray_bundle.directions.shape[:-1], 1), dtype=ray_bundle.directions.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
+        ray_bundle.origins = torch.matmul(transform @ fake_transform, torch.cat([ray_bundle.origins, torch.ones((*ray_bundle.origins.shape[:-1], 1), dtype=ray_bundle.origins.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
+        ray_bundle.directions = torch.matmul(transform @ fake_transform, torch.cat([ray_bundle.directions, torch.zeros((*ray_bundle.directions.shape[:-1], 1), dtype=ray_bundle.directions.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
 
         # get sub output
         sub_outputs = self.sub_model(ray_bundle)
