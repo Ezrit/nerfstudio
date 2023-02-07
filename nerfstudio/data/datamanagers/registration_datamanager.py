@@ -20,7 +20,10 @@ from abc import abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type
 
+import torch
+from torch.distributions.multivariate_normal import MultivariateNormal
 from torch.nn import Parameter
+from torchtyping import TensorType
 
 from nerfstudio.configs.base_config import InstantiateConfig
 from nerfstudio.data.datamanagers import base_datamanager
@@ -33,6 +36,13 @@ class RegistrationDataManagerConfig(InstantiateConfig):
     """A registration datamanager - required to use with .setup()"""
 
     _target: Type = field(default_factory=lambda: RegistrationDataManager)
+    """Target class to instantiate."""
+    train_num_rays_per_batch: int = 1024
+    """Number of rays per batch to use per training iteration."""
+    train_num_images_to_sample_from: int = 200
+    """Number of images to sample during training iteration."""
+    train_image_size: Tuple[int, int] = (960, 1920)
+    """Image size to sample from."""
 
 
 class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=abstract-method
@@ -41,8 +51,13 @@ class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=
         config: the DataManagerConfig used to instantiate class
     """
 
+    config: RegistrationDataManagerConfig
     pixel_sampler: Optional[EquirectangularPixelSampler] = None
     training_callbacks: List[TrainingCallback] = []
+    position_sampler: Optional[MultivariateNormal] = None
+
+    def update_position_sampler(self, nerf_centers: TensorType) -> None:
+        pass
 
     @abstractmethod
     def setup_train(self):
@@ -62,6 +77,10 @@ class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=
 
         This will be a tuple of all the information that this data manager outputs.
         """
+        assert self.position_sampler is not None, "position sample is not initialized!"
+
+        sampled_positions = self.position_sampler.rsample(torch.Size((self.config.train_num_images_to_sample_from, )))
+
         raise NotImplementedError
 
     @abstractmethod
@@ -70,7 +89,7 @@ class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=
 
         This will be a tuple of all the information that this data manager outputs.
         """
-        raise NotImplementedError
+        return self.next_train(step)
 
     @abstractmethod
     def next_eval_image(self, step: int) -> Tuple:
