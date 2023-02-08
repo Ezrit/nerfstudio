@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import yaml
 from rich.console import Console
@@ -35,6 +35,7 @@ from nerfstudio.configs.config_utils import to_immutable_dict
 from nerfstudio.engine.optimizers import OptimizerConfig
 from nerfstudio.engine.schedulers import SchedulerConfig
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
+from nerfstudio.pipelines.registration_pipeline import RegistrationPipelineConfig
 
 CONSOLE = Console(width=120)
 
@@ -58,7 +59,7 @@ class ExperimentConfig(InstantiateConfig):
     """Logging configuration"""
     viewer: ViewerConfig = ViewerConfig()
     """Viewer configuration"""
-    pipeline: VanillaPipelineConfig = VanillaPipelineConfig()
+    pipeline: Union[VanillaPipelineConfig, RegistrationPipelineConfig] = VanillaPipelineConfig()
     """Pipeline configuration"""
     optimizers: Dict[str, Any] = to_immutable_dict(
         {

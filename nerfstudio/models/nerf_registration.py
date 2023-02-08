@@ -21,77 +21,78 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RayBundle
+from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.engine.callbacks import (
     TrainingCallback,
     TrainingCallbackAttributes,
     TrainingCallbackLocation,
 )
-from nerfstudio.engine.trainer import TrainerConfig
+
+# from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.model_components.losses import MSELoss
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.pipelines.base_pipeline import Pipeline
 from nerfstudio.utils import colormaps
 
+# def load_checkpoint(config: TrainerConfig, pipeline: Pipeline) -> Path:
+#     # TODO: ideally eventually want to get this to be the same as whatever is used to load train checkpoint too
+#     """Helper function to load checkpointed pipeline
 
-def load_checkpoint(config: TrainerConfig, pipeline: Pipeline) -> Path:
-    # TODO: ideally eventually want to get this to be the same as whatever is used to load train checkpoint too
-    """Helper function to load checkpointed pipeline
-
-    Args:
-        config (DictConfig): Configuration of pipeline to load
-        pipeline (Pipeline): Pipeline instance of which to load weights
-    """
-    assert config.load_dir is not None
-    if config.load_step is None:
-        # NOTE: this is specific to the checkpoint name format
-        if not os.path.exists(config.load_dir):
-            sys.exit(1)
-        load_step = sorted(int(x[x.find("-") + 1 : x.find(".")]) for x in os.listdir(config.load_dir))[-1]
-    else:
-        load_step = config.load_step
-    load_path = config.load_dir / f"step-{load_step:09d}.ckpt"
-    assert load_path.exists(), f"Checkpoint {load_path} does not exist"
-    loaded_state = torch.load(load_path, map_location="cpu")
-    pipeline.load_pipeline(loaded_state["pipeline"])
-    return load_path
-
-
-def load_model_from_config(
-    config_path: Path,
-) -> Model:
-    """Shared setup for loading a saved pipeline for evaluation.
-
-    Args:
-        config_path: Path to config YAML file.
-        eval_num_rays_per_chunk: Number of rays per forward pass
-        test_mode:
-            'val': loads train/val datasets into memory
-            'test': loads train/test datset into memory
-            'inference': does not load any dataset into memory
+#     Args:
+#         config (DictConfig): Configuration of pipeline to load
+#         pipeline (Pipeline): Pipeline instance of which to load weights
+#     """
+#     assert config.load_dir is not None
+#     if config.load_step is None:
+#         # NOTE: this is specific to the checkpoint name format
+#         if not os.path.exists(config.load_dir):
+#             sys.exit(1)
+#         load_step = sorted(int(x[x.find("-") + 1 : x.find(".")]) for x in os.listdir(config.load_dir))[-1]
+#     else:
+#         load_step = config.load_step
+#     load_path = config.load_dir / f"step-{load_step:09d}.ckpt"
+#     assert load_path.exists(), f"Checkpoint {load_path} does not exist"
+#     loaded_state = torch.load(load_path, map_location="cpu")
+#     pipeline.load_pipeline(loaded_state["pipeline"])
+#     return load_path
 
 
-    Returns:
-        Loaded config, pipeline module, and corresponding checkpoint.
-    """
-    # load save config
-    config = yaml.load(config_path.read_text(), Loader=yaml.Loader)
-    assert isinstance(config, TrainerConfig)
+# def load_model_from_config(
+#     config_path: Path,
+# ) -> Model:
+#     """Shared setup for loading a saved pipeline for evaluation.
 
-    # load checkpoints from wherever they were saved
-    # TODO: expose the ability to choose an arbitrary checkpoint
-    config.load_dir = config.get_checkpoint_dir()
+#     Args:
+#         config_path: Path to config YAML file.
+#         eval_num_rays_per_chunk: Number of rays per forward pass
+#         test_mode:
+#             'val': loads train/val datasets into memory
+#             'test': loads train/test datset into memory
+#             'inference': does not load any dataset into memory
 
-    # setup pipeline (which includes the DataManager)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pipeline = config.pipeline.setup(device=device, test_mode="inference")
-    assert isinstance(pipeline, Pipeline)
-    pipeline.requires_grad_(False)
 
-    # load checkpointed information
-    _ = load_checkpoint(config, pipeline)
-    model: Model = pipeline._model
+#     Returns:
+#         Loaded config, pipeline module, and corresponding checkpoint.
+#     """
+#     # load save config
+#     config = yaml.load(config_path.read_text(), Loader=yaml.Loader)
+#     assert isinstance(config, TrainerConfig)
 
-    return model
+#     # load checkpoints from wherever they were saved
+#     # TODO: expose the ability to choose an arbitrary checkpoint
+#     config.load_dir = config.get_checkpoint_dir()
+
+#     # setup pipeline (which includes the DataManager)
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     pipeline = config.pipeline.setup(device=device, test_mode="inference")
+#     assert isinstance(pipeline, Pipeline)
+#     pipeline.requires_grad_(False)
+
+#     # load checkpointed information
+#     _ = load_checkpoint(config, pipeline)
+#     model: Model = pipeline._model
+
+#     return model
 
 
 def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
@@ -142,6 +143,22 @@ class NerfRegistrationModel(Model):
 
     config: NerfRegistrationConfig
 
+    def __init__(
+        self,
+        main_model: Model,
+        sub_model: Model,
+        config: ModelConfig,
+        scene_box: SceneBox,
+        num_train_data: int,
+        **kwargs,
+    ) -> None:
+        # save and fix models
+        self.main_model = main_model
+        self.main_model.requires_grad_(False)
+        self.sub_model = sub_model
+        self.sub_model.requires_grad_(False)
+        super().__init__(config, scene_box, num_train_data, **kwargs)
+
     def log_wand_3d_nerf_box(self, number_ray_vis: int, coordinate_system_length: float, ray_length: float,  step: int) -> None:
         boxes = []
         points = []
@@ -177,13 +194,13 @@ class NerfRegistrationModel(Model):
         inv_fake_transformation[:3, :3] = ((1.0 / self.fake_scaling[0]) * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.fake_rotation).T
         inv_fake_transformation[:3, 3] = -inv_fake_transformation[:3, :3] @ self.fake_translation
 
-        # compute inverse of the (currently) learned transformation for computing the sub nerf box points
-        inv_transformation: TensorType[4, 4] = torch.eye(4, device=self.device)
-        inv_transformation[:3, :3] = ((1.0 / self.scale[0]) * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.rotation).T
-        inv_transformation[:3, 3] = -inv_transformation[:3, :3] @ self.translate
+        # # compute inverse of the (currently) learned transformation for computing the sub nerf box points
+        # inv_transformation: TensorType[4, 4] = torch.eye(4, device=self.device)
+        # inv_transformation[:3, :3] = ((1.0 / self.scale[0]) * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.rotation).T
+        # inv_transformation[:3, 3] = -inv_transformation[:3, :3] @ self.translate
 
         # apply transformations
-        sub_box_points = torch.matmul(inv_fake_transformation @ inv_transformation, main_box_points)
+        sub_box_points = torch.matmul(inv_fake_transformation @ self.sub_to_main_transformation, main_box_points)
         sub_box = {
             "corners": sub_box_points[:, :3, 0].tolist(),
             # optionally customize each label
@@ -196,8 +213,8 @@ class NerfRegistrationModel(Model):
         boxes.append(sub_box)
 
         # visualize coordinate system of sub nerf box
-        coordinate_origin_sub: TensorType[1, 4, 1] = torch.matmul(inv_fake_transformation @ inv_transformation, coordinate_origin_main)
-        coordinate_directions_sub: TensorType[3, 4, 1] = torch.matmul(inv_fake_transformation @ inv_transformation, coordinate_directions_main)
+        coordinate_origin_sub: TensorType[1, 4, 1] = torch.matmul(inv_fake_transformation @ self.sub_to_main_transformation, coordinate_origin_main)
+        coordinate_directions_sub: TensorType[3, 4, 1] = torch.matmul(inv_fake_transformation @ self.sub_to_main_transformation, coordinate_directions_main)
         sub_coord_vector = [{"start": coordinate_origin_sub[0, :3, 0].tolist(), "end": (coordinate_origin_sub[0, :3, 0] + coordinate_system_length * coordinate_directions_sub[i, :3, 0]).tolist()} for i in range(3)]
         vectors += sub_coord_vector
 
@@ -237,6 +254,20 @@ class NerfRegistrationModel(Model):
             }, step=step
         )
 
+    @property
+    def main_to_sub_transformation(self) -> TensorType[4, 4]:
+        transformation: TensorType[4, 4] = torch.eye(4, device=self.device)
+        transformation[:3, :3] = (self.scale[0] * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.rotation)
+        transformation[:3, 3] = self.translate
+        return transformation
+
+    @property
+    def sub_to_main_transformation(self) -> TensorType[4, 4]:
+        transformation: TensorType[4, 4] = torch.eye(4, device=self.device)
+        transformation[:3, :3] = ((1.0 / self.scale[0]) * torch.eye(3, device=self.device)) @ quaternion_to_rotation_matrix(self.rotation).T
+        transformation[:3, 3] = -transformation[:3, :3] @ self.translate
+        return transformation
+
     def get_training_callbacks(self, training_callback_attributes: TrainingCallbackAttributes) -> List[TrainingCallback]:
         callbacks: List[TrainingCallback] = []
         if wandb.run is not None:
@@ -265,14 +296,6 @@ class NerfRegistrationModel(Model):
         self.fake_translation = torch.nn.Parameter(torch.tensor(self.config.fake_translation))
         self.fake_scaling = torch.nn.Parameter(torch.tensor(self.config.fake_scaling))
         self.fake_rotation = torch.nn.Parameter(torch.tensor(self.config.fake_rotation))
-
-        # load and fix main model
-        self.main_model = load_model_from_config(self.config.main_method_config)
-        self.main_model.requires_grad_(False)
-
-        # load and fix sub model
-        self.sub_model = load_model_from_config(self.config.sub_method_config)
-        self.sub_model.requires_grad_(False)
 
         # losses
         self.rgb_loss = MSELoss()
@@ -313,16 +336,16 @@ class NerfRegistrationModel(Model):
         fake_transform[:3, :3] = fake_scaling @ fake_rotation @ fake_transform[:3, :3]
         fake_transform[:3, 3] = self.fake_translation + fake_transform[:3, 3]
 
-        # apply learned transform
-        transform = torch.eye(4, device=self.device)
-        scaling = self.scale[0] * torch.eye(3, device=self.device)
-        rotation = quaternion_to_rotation_matrix(self.rotation)
-        transform[:3, :3] = scaling @ rotation @ transform[:3, :3]
-        transform[:3, 3] = self.translate + transform[:3, 3]
+        # # apply learned transform
+        # transform = torch.eye(4, device=self.device)
+        # scaling = self.scale[0] * torch.eye(3, device=self.device)
+        # rotation = quaternion_to_rotation_matrix(self.rotation)
+        # transform[:3, :3] = scaling @ rotation @ transform[:3, :3]
+        # transform[:3, 3] = self.translate + transform[:3, 3]
 
         # apply the transformation matrix to the rays origins and directions
-        ray_bundle.origins = torch.matmul(transform @ fake_transform, torch.cat([ray_bundle.origins, torch.ones((*ray_bundle.origins.shape[:-1], 1), dtype=ray_bundle.origins.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
-        ray_bundle.directions = torch.matmul(transform @ fake_transform, torch.cat([ray_bundle.directions, torch.zeros((*ray_bundle.directions.shape[:-1], 1), dtype=ray_bundle.directions.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
+        ray_bundle.origins = torch.matmul(self.main_to_sub_transformation @ fake_transform, torch.cat([ray_bundle.origins, torch.ones((*ray_bundle.origins.shape[:-1], 1), dtype=ray_bundle.origins.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
+        ray_bundle.directions = torch.matmul(self.main_to_sub_transformation @ fake_transform, torch.cat([ray_bundle.directions, torch.zeros((*ray_bundle.directions.shape[:-1], 1), dtype=ray_bundle.directions.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]
 
         # get sub output
         sub_outputs = self.sub_model(ray_bundle)
