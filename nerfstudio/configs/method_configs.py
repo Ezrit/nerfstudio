@@ -27,9 +27,10 @@ from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManagerConfig
 from nerfstudio.data.datamanagers.depth_datamanager import DepthDataManagerConfig
-from nerfstudio.data.datamanagers.registration_datamanager import (
-    RegistrationDataManagerConfig,
-)
+
+# from nerfstudio.data.datamanagers.registration_datamanager import (
+#     RegistrationDataManagerConfig,
+# )
 from nerfstudio.data.datamanagers.semantic_datamanager import SemanticDataManagerConfig
 from nerfstudio.data.datamanagers.variable_res_datamanager import (
     VariableResDataManagerConfig,
@@ -59,7 +60,8 @@ from nerfstudio.models.tensorf import TensoRFModelConfig
 from nerfstudio.models.vanilla_nerf import NeRFModel, VanillaModelConfig
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
 from nerfstudio.pipelines.dynamic_batch import DynamicBatchPipelineConfig
-from nerfstudio.pipelines.registration_pipeline import RegistrationPipelineConfig
+
+# from nerfstudio.pipelines.registration_pipeline import RegistrationPipelineConfig
 
 method_configs: Dict[str, TrainerConfig] = {}
 descriptions = {
@@ -74,36 +76,37 @@ descriptions = {
     "dnerf": "Dynamic-NeRF model. (slow)",
     "phototourism": "Uses the Phototourism data.",
     "nerf-registration": "Registration of 2 trained NeRF models.",
+    "nerf-registration-old": "Registration of 2 trained NeRF models.",
 }
 
-method_configs["nerf-registration"] = TrainerConfig(
-    method_name="nerf-registration",
-    steps_per_eval_batch=500,
-    steps_per_eval_image=500,
-    steps_per_save=2000,
-    max_num_iterations=30000,
-    mixed_precision=True,
-    pipeline=RegistrationPipelineConfig(
-        datamanager=RegistrationDataManagerConfig(
-            train_num_rays_per_batch=4096,
-            train_num_images_to_sample_from=800,
-            train_num_images_to_sample=200,
-            train_image_size=(960, 1920),
-            camera_optimizer=CameraOptimizerConfig(
-                mode="off", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
-            ),
-        ),
-        model=NerfRegistrationConfig(eval_num_rays_per_chunk=1 << 15),
-    ),
-    optimizers={
-        "transform": {
-            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": None,
-        },
-    },
-    viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
-    vis="wandb",
-)
+# method_configs["nerf-registration"] = TrainerConfig(
+#     method_name="nerf-registration",
+#     steps_per_eval_batch=500,
+#     steps_per_eval_image=500,
+#     steps_per_save=2000,
+#     max_num_iterations=30000,
+#     mixed_precision=True,
+#     pipeline=RegistrationPipelineConfig(
+#         datamanager=RegistrationDataManagerConfig(
+#             train_num_rays_per_batch=4096,
+#             train_num_images_to_sample_from=800,
+#             train_num_images_to_sample=200,
+#             train_image_size=(960, 1920),
+#             camera_optimizer=CameraOptimizerConfig(
+#                 mode="off", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
+#             ),
+#         ),
+#         model=NerfRegistrationConfig(eval_num_rays_per_chunk=1 << 15),
+#     ),
+#     optimizers={
+#         "transform": {
+#             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+#             "scheduler": None,
+#         },
+#     },
+#     viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+#     vis="wandb",
+# )
 
 method_configs["nerf-registration-old"] = TrainerConfig(
     method_name="nerf-registration",

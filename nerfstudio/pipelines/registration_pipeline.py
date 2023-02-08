@@ -124,15 +124,9 @@ class RegistrationPipeline(Pipeline):
 
         self.world_size = world_size
 
-
-    @property
-    def model(self) -> NerfRegistrationModel:
-        """Returns the unwrapped model if in ddp"""
-        return self._model
-
     def update_ray_generator(self) -> None:
         nerf_centers: TensorType[2, 3] = torch.zeros((2, 3), dtype=torch.float, device=self.device)
-        nerf_centers[1, :] = self.model.sub_to_main_transformation[:3, 3]
+        nerf_centers[1, :] = self._model.sub_to_main_transformation[:3, 3]
 
         self.datamanager.update_ray_generator(nerf_centers)
 
