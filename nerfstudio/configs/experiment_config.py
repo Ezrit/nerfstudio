@@ -60,6 +60,7 @@ class ExperimentConfig(InstantiateConfig):
     viewer: ViewerConfig = ViewerConfig()
     """Viewer configuration"""
     # pipeline: Optional[Union[VanillaPipelineConfig, RegistrationPipelineConfig]] = None
+    # pipeline: InstantiateConfig = VanillaPipelineConfig()
     pipeline: VanillaPipelineConfig = VanillaPipelineConfig()
     """Pipeline configuration"""
     optimizers: Dict[str, Any] = to_immutable_dict(

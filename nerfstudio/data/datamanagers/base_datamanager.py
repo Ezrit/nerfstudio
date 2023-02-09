@@ -379,6 +379,8 @@ class VanillaDataManager(DataManager):  # pylint: disable=abstract-method
             self.train_camera_optimizer,
         )
 
+        print('abc')
+
     def setup_eval(self):
         """Sets up the data loader for evaluation"""
         assert self.eval_dataset is not None

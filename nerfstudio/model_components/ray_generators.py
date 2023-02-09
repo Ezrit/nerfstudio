@@ -32,7 +32,7 @@ class RayGenerator(nn.Module):
         pose_optimizer: pose optimization module, for optimizing noisy camera intrisics/extrinsics.
     """
 
-    def __init__(self, cameras: Cameras, pose_optimizer: CameraOptimizer) -> None:
+    def __init__(self, cameras: Cameras, pose_optimizer: CameraOptimizer):
         super().__init__()
         self.cameras = cameras
         self.pose_optimizer = pose_optimizer

@@ -34,65 +34,66 @@ from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.pipelines.base_pipeline import Pipeline
 from nerfstudio.utils import colormaps
 
-# def load_checkpoint(config: TrainerConfig, pipeline: Pipeline) -> Path:
-#     # TODO: ideally eventually want to get this to be the same as whatever is used to load train checkpoint too
-#     """Helper function to load checkpointed pipeline
 
-#     Args:
-#         config (DictConfig): Configuration of pipeline to load
-#         pipeline (Pipeline): Pipeline instance of which to load weights
-#     """
-#     assert config.load_dir is not None
-#     if config.load_step is None:
-#         # NOTE: this is specific to the checkpoint name format
-#         if not os.path.exists(config.load_dir):
-#             sys.exit(1)
-#         load_step = sorted(int(x[x.find("-") + 1 : x.find(".")]) for x in os.listdir(config.load_dir))[-1]
-#     else:
-#         load_step = config.load_step
-#     load_path = config.load_dir / f"step-{load_step:09d}.ckpt"
-#     assert load_path.exists(), f"Checkpoint {load_path} does not exist"
-#     loaded_state = torch.load(load_path, map_location="cpu")
-#     pipeline.load_pipeline(loaded_state["pipeline"])
-#     return load_path
+def load_checkpoint(config, pipeline: Pipeline) -> Path:
+    # TODO: ideally eventually want to get this to be the same as whatever is used to load train checkpoint too
+    """Helper function to load checkpointed pipeline
 
-
-# def load_model_from_config(
-#     config_path: Path,
-# ) -> Model:
-#     """Shared setup for loading a saved pipeline for evaluation.
-
-#     Args:
-#         config_path: Path to config YAML file.
-#         eval_num_rays_per_chunk: Number of rays per forward pass
-#         test_mode:
-#             'val': loads train/val datasets into memory
-#             'test': loads train/test datset into memory
-#             'inference': does not load any dataset into memory
+    Args:
+        config (DictConfig): Configuration of pipeline to load
+        pipeline (Pipeline): Pipeline instance of which to load weights
+    """
+    assert config.load_dir is not None
+    if config.load_step is None:
+        # NOTE: this is specific to the checkpoint name format
+        if not os.path.exists(config.load_dir):
+            sys.exit(1)
+        load_step = sorted(int(x[x.find("-") + 1 : x.find(".")]) for x in os.listdir(config.load_dir))[-1]
+    else:
+        load_step = config.load_step
+    load_path = config.load_dir / f"step-{load_step:09d}.ckpt"
+    assert load_path.exists(), f"Checkpoint {load_path} does not exist"
+    loaded_state = torch.load(load_path, map_location="cpu")
+    pipeline.load_pipeline(loaded_state["pipeline"])
+    return load_path
 
 
-#     Returns:
-#         Loaded config, pipeline module, and corresponding checkpoint.
-#     """
-#     # load save config
-#     config = yaml.load(config_path.read_text(), Loader=yaml.Loader)
-#     assert isinstance(config, TrainerConfig)
+def load_model_from_config(
+    config_path: Path,
+) -> Model:
+    """Shared setup for loading a saved pipeline for evaluation.
 
-#     # load checkpoints from wherever they were saved
-#     # TODO: expose the ability to choose an arbitrary checkpoint
-#     config.load_dir = config.get_checkpoint_dir()
+    Args:
+        config_path: Path to config YAML file.
+        eval_num_rays_per_chunk: Number of rays per forward pass
+        test_mode:
+            'val': loads train/val datasets into memory
+            'test': loads train/test datset into memory
+            'inference': does not load any dataset into memory
 
-#     # setup pipeline (which includes the DataManager)
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     pipeline = config.pipeline.setup(device=device, test_mode="inference")
-#     assert isinstance(pipeline, Pipeline)
-#     pipeline.requires_grad_(False)
 
-#     # load checkpointed information
-#     _ = load_checkpoint(config, pipeline)
-#     model: Model = pipeline._model
+    Returns:
+        Loaded config, pipeline module, and corresponding checkpoint.
+    """
+    # load save config
+    config = yaml.load(config_path.read_text(), Loader=yaml.Loader)
+    # assert isinstance(config, TrainerConfig)
 
-#     return model
+    # load checkpoints from wherever they were saved
+    # TODO: expose the ability to choose an arbitrary checkpoint
+    config.load_dir = config.get_checkpoint_dir()
+
+    # setup pipeline (which includes the DataManager)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pipeline = config.pipeline.setup(device=device, test_mode="inference")
+    assert isinstance(pipeline, Pipeline)
+    pipeline.requires_grad_(False)
+
+    # load checkpointed information
+    _ = load_checkpoint(config, pipeline)
+    model: Model = pipeline._model
+
+    return model
 
 
 def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
@@ -142,22 +143,6 @@ class NerfRegistrationModel(Model):
     """
 
     config: NerfRegistrationConfig
-
-    def __init__(
-        self,
-        main_model: Model,
-        sub_model: Model,
-        config: ModelConfig,
-        scene_box: SceneBox,
-        num_train_data: int,
-        **kwargs,
-    ) -> None:
-        # save and fix models
-        self.main_model = main_model
-        self.main_model.requires_grad_(False)
-        self.sub_model = sub_model
-        self.sub_model.requires_grad_(False)
-        super().__init__(config, scene_box, num_train_data, **kwargs)
 
     def log_wand_3d_nerf_box(self, number_ray_vis: int, coordinate_system_length: float, ray_length: float,  step: int) -> None:
         boxes = []
@@ -276,7 +261,7 @@ class NerfRegistrationModel(Model):
                     where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
                     update_every_num_iters=50,
                     func=self.log_wand_3d_nerf_box,
-                    kwargs={"number_ray_vis": 100, "coordinate_system_length": 0.5, "ray_length": 0.1},
+                    kwargs={"number_ray_vis": 200, "coordinate_system_length": 0.5, "ray_length": 0.1},
                 )
             )
         return callbacks
@@ -296,6 +281,14 @@ class NerfRegistrationModel(Model):
         self.fake_translation = torch.nn.Parameter(torch.tensor(self.config.fake_translation))
         self.fake_scaling = torch.nn.Parameter(torch.tensor(self.config.fake_scaling))
         self.fake_rotation = torch.nn.Parameter(torch.tensor(self.config.fake_rotation))
+
+        # load and fix main model
+        self.main_model = load_model_from_config(self.config.main_method_config)
+        self.main_model.requires_grad_(False)
+
+        # load and fix sub model
+        self.sub_model = load_model_from_config(self.config.sub_method_config)
+        self.sub_model.requires_grad_(False)
 
         # losses
         self.rgb_loss = MSELoss()
@@ -335,13 +328,6 @@ class NerfRegistrationModel(Model):
         fake_rotation = quaternion_to_rotation_matrix(self.fake_rotation)
         fake_transform[:3, :3] = fake_scaling @ fake_rotation @ fake_transform[:3, :3]
         fake_transform[:3, 3] = self.fake_translation + fake_transform[:3, 3]
-
-        # # apply learned transform
-        # transform = torch.eye(4, device=self.device)
-        # scaling = self.scale[0] * torch.eye(3, device=self.device)
-        # rotation = quaternion_to_rotation_matrix(self.rotation)
-        # transform[:3, :3] = scaling @ rotation @ transform[:3, :3]
-        # transform[:3, 3] = self.translate + transform[:3, 3]
 
         # apply the transformation matrix to the rays origins and directions
         ray_bundle.origins = torch.matmul(self.main_to_sub_transformation @ fake_transform, torch.cat([ray_bundle.origins, torch.ones((*ray_bundle.origins.shape[:-1], 1), dtype=ray_bundle.origins.dtype, device=self.device)], 1).view(-1, 4, 1)).view(*ray_bundle.origins.shape[:-1], 4)[..., :3]

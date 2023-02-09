@@ -32,6 +32,8 @@ from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.configs.base_config import InstantiateConfig
 from nerfstudio.data.datamanagers import base_datamanager
+from nerfstudio.data.dataparsers.no_dataparser import NoDataParserConfig
+from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.data.pixel_samplers import EquirectangularPixelSampler
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.model_components.ray_generators import RayGenerator
@@ -84,13 +86,12 @@ def get_multivariate_normal_3d(centers: torch.Tensor) -> torch.distributions.mul
     direction_length = torch.linalg.vector_norm(direction, ord=2)
     direction_norm = direction / direction_length
 
-    up_direction = torch.tensor([0, 1, 0], dtype=direction_norm.dtype, device=direction_norm.device)
+    up_direction = torch.tensor([0, 0, 1], dtype=direction_norm.dtype, device=direction_norm.device)
     ortho_direction = torch.cross(up_direction, direction_norm)
     ortho_up = torch.cross(direction_norm, ortho_direction)
 
-    eigenvectors = torch.stack((direction_norm, ortho_up, ortho_direction), dim=0)
-    eigenvalues = torch.tensor([torch.sqrt(direction_length/2)/3, 0.01, torch.sqrt(direction_length/2)/3/2])
-    print(eigenvalues)
+    eigenvectors = torch.stack((direction_norm, ortho_direction, ortho_up), dim=0)
+    eigenvalues = torch.tensor([torch.sqrt(direction_length/2)/3, torch.sqrt(direction_length/2)/3/2, 0.01], dtype=torch.float, device=direction_norm.device)
 
     cov = covariance_matrix(eigenvectors, eigenvalues)
 
@@ -98,32 +99,37 @@ def get_multivariate_normal_3d(centers: torch.Tensor) -> torch.distributions.mul
 
 
 @dataclass
-class RegistrationDataManagerConfig(InstantiateConfig):
+class RegistrationDataManagerConfig(base_datamanager.VanillaDataManagerConfig):
     """A registration datamanager - required to use with .setup()"""
 
     _target: Type = field(default_factory=lambda: RegistrationDataManager)
     """Target class to instantiate."""
     train_num_rays_per_batch: int = 1024
     """Number of rays per batch to use per training iteration."""
-    train_num_images_to_sample_from: int = 800
+    train_num_images_to_sample_from: int = 200
     """Number of images to sample during training iteration."""
     train_num_images_to_sample: int = 200
     """Number of images to sample during training iteration."""
     train_image_size: Tuple[int, int] = (960, 1920)
     """Image size to sample from."""
-    camera_optimizer: CameraOptimizerConfig = CameraOptimizerConfig()
-    """Specifies the camera pose optimizer used during training. Helpful if poses are noisy, such as for data from
-    Record3D."""
+    dataparser: NoDataParserConfig = NoDataParserConfig()
+    """Specifies the dataparser used to unpack the data."""
+    # eval_num_rays_per_batch: None = None
+    # eval_num_images_to_sample_from: None = None
+    # eval_num_times_to_repeat_images: None = None
+    # eval_image_indices: None = None
+    # camera_res_scale_factor: None = None
+    # train_num_times_to_repeat_images: None = None
 
 
-class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=abstract-method
+class RegistrationDataManager(base_datamanager.VanillaDataManager):  # pylint: disable=abstract-method
     """Data manager implementation for feeding positions and directions for optimizing for transformation
     Args:
         config: the DataManagerConfig used to instantiate class
     """
 
     pixel_sampler: Optional[EquirectangularPixelSampler] = None
-    ray_generator: Optional[RayGenerator] = None
+    train_dataset: InputDataset
     training_callbacks: List[TrainingCallback] = []
     position_sampler: Optional[MultivariateNormal] = None
 
@@ -136,16 +142,20 @@ class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=
         local_rank: int = 0,
         **kwargs,  # pylint: disable=unused-argument
     ):
+        super().__init__(config)
         self.config = config
         self.device = device
         self.world_size = world_size
         self.local_rank = local_rank
         self.test_mode = test_mode
-        self.dummy_images = torch.zeros((self.config.train_num_images_to_sample_from, self.config.train_image_size[0], self.config.train_image_size[1], 3), dtype=torch.float)
+        dummy_idx = torch.tensor(range(self.config.train_num_images_to_sample_from), dtype=torch.int)
+        dummy_images = torch.zeros((self.config.train_num_images_to_sample_from, self.config.train_image_size[0], self.config.train_image_size[1], 3), dtype=torch.float)
+        self.image_batch = {}
+        self.image_batch['image_idx'] = dummy_idx
+        self.image_batch['image'] = dummy_images
+        self.setup_train()
 
-        super().__init__()
-
-    def update_ray_generator(self, nerf_centers: TensorType[2, 3]) -> None:
+    def update_ray_generator(self, nerf_centers: TensorType[2, 3], step: int) -> None:
         assert self.ray_generator is not None
         # create new c2w matrizes without the translation for now
         # rotation should not be needed as we use equirectangular cameras atm
@@ -154,10 +164,11 @@ class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=
 
         # generate new translations
         self.position_sampler = get_multivariate_normal_3d(nerf_centers)
-        new_translations = self.position_sampler.rsample(torch.Size((self.config.train_num_images_to_sample_from, ))).reshape((-1, 1, 3)).to(self.device)
+        new_translations = self.position_sampler.rsample(torch.Size((self.config.train_num_images_to_sample_from, )))
+        new_translations_reshaped = new_translations.reshape((-1, 3, 1)).to(self.device)
 
         # stack the translations (NOT! negative cause its camera -> world, not the other way)
-        new_camera_to_worlds = torch.stack((new_camera_to_worlds, new_translations), dim=2)
+        new_camera_to_worlds = torch.cat((new_camera_to_worlds, new_translations_reshaped), dim=2)
 
         # update the cameras
         # need to generate a new generator i think, cause of the image_coords... well or just update them...
@@ -186,14 +197,14 @@ class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=
         camera_to_worlds = camera_to_worlds.repeat(self.config.train_num_images_to_sample_from, 1, 1)
 
         # generate new translations
-        translations = self.position_sampler.rsample(torch.Size((self.config.train_num_images_to_sample_from, ))).reshape((-1, 1, 3)).to(self.device)
+        translations = self.position_sampler.rsample(torch.Size((self.config.train_num_images_to_sample_from, ))).reshape((-1, 3, 1)).to(self.device)
 
         # stack the translations (NOT! negative cause its camera -> world, not the other way)
-        camera_to_worlds = torch.stack((camera_to_worlds, translations), dim=2)
+        camera_to_worlds = torch.cat((camera_to_worlds, translations), dim=2)
 
         # create cameras, no distortion since equirectangular
         height, width = self.config.train_image_size
-        cameras = Cameras(
+        self.cameras = Cameras(
             fx=float(width) / 2,
             fy=float(width) / 2,
             cx=float(width) / 2,
@@ -213,9 +224,11 @@ class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=
 
         # setup the ray generator
         self.ray_generator = RayGenerator(
-            cameras.to(self.device),
+            self.cameras.to(self.device),
             self.camera_optimizer,
         )
+
+        self.pixel_sampler = EquirectangularPixelSampler(self.config.train_num_rays_per_batch)
 
     @abstractmethod
     def setup_eval(self):
@@ -231,11 +244,11 @@ class RegistrationDataManager(base_datamanager.DataManager):  # pylint: disable=
         """
         assert self.position_sampler is not None, "position sample is not initialized!"
 
-        image_batch = {}
-        image_batch['image_idx'] = torch.randint(self.config.train_num_images_to_sample_from, (self.config.train_num_images_to_sample,))
-        image_batch['image'] = self.dummy_images
+        # image_batch = {}
+        # image_batch['image_idx'] = torch.randint(self.config.train_num_images_to_sample_from, (self.config.train_num_images_to_sample,))
+        # image_batch['image'] = self.dummy_images
         assert self.pixel_sampler is not None, "pixel sampler is None"
-        batch = self.pixel_sampler.sample(image_batch)
+        batch = self.pixel_sampler.sample(self.image_batch)
         assert self.ray_generator is not None, "ray generator is None"
         ray_indices = batch["indices"]
         ray_bundle = self.ray_generator(ray_indices)
