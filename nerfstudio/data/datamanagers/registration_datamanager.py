@@ -90,8 +90,8 @@ def get_multivariate_normal_3d(centers: torch.Tensor) -> torch.distributions.mul
     ortho_direction = torch.cross(up_direction, direction_norm)
     ortho_up = torch.cross(direction_norm, ortho_direction)
 
-    eigenvectors = torch.stack((direction_norm, ortho_direction, ortho_up), dim=0)
-    eigenvalues = torch.tensor([torch.sqrt(direction_length/2)/3, torch.sqrt(direction_length/2)/3/2, 0.01], dtype=torch.float, device=direction_norm.device)
+    eigenvectors = torch.stack((ortho_direction, direction_norm, ortho_up), dim=0)
+    eigenvalues = torch.tensor([torch.sqrt(direction_length/2)/3/2, torch.sqrt(direction_length/2)/3, 0.01], dtype=torch.float, device=direction_norm.device)
 
     cov = covariance_matrix(eigenvectors, eigenvalues)
 
@@ -159,7 +159,8 @@ class RegistrationDataManager(base_datamanager.VanillaDataManager):  # pylint: d
         assert self.ray_generator is not None
         # create new c2w matrizes without the translation for now
         # rotation should not be needed as we use equirectangular cameras atm
-        new_camera_to_worlds = torch.eye(3, dtype=torch.float, device=self.device).reshape((1, 3, 3))
+        # new_camera_to_worlds = torch.eye(3, dtype=torch.float, device=self.device).reshape((1, 3, 3))
+        new_camera_to_worlds = torch.index_select(torch.eye(3, dtype=torch.float, device=self.device), 1, torch.tensor([0, 2, 1], device=self.device)).reshape((1, 3, 3))
         new_camera_to_worlds = new_camera_to_worlds.repeat(self.config.train_num_images_to_sample_from, 1, 1)
 
         # generate new translations
@@ -193,7 +194,7 @@ class RegistrationDataManager(base_datamanager.VanillaDataManager):  # pylint: d
         # setup initial ray_generator
         # create c2w matrizes without the translation for now
         # rotation should not be needed as we use equirectangular cameras atm
-        camera_to_worlds = torch.eye(3, dtype=torch.float, device=self.device).reshape((1, 3, 3))
+        camera_to_worlds = torch.index_select(torch.eye(3, dtype=torch.float, device=self.device), 1, torch.tensor([0, 2, 1], device=self.device)).reshape((1, 3, 3))
         camera_to_worlds = camera_to_worlds.repeat(self.config.train_num_images_to_sample_from, 1, 1)
 
         # generate new translations
@@ -266,7 +267,13 @@ class RegistrationDataManager(base_datamanager.VanillaDataManager):  # pylint: d
     @abstractmethod
     def next_eval_image(self, step: int) -> Tuple:
         """Returns the next eval image."""
-        raise NotImplementedError
+        # raise NotImplementedError
+        rand_idx = torch.randint(self.config.train_num_images_to_sample_from, (1,))
+        ray_bundle = self.ray_generator.cameras.generate_rays(camera_indices=int(rand_idx[0]))
+        assert ray_bundle.camera_indices is not None
+        image_idx = int(ray_bundle.camera_indices[0, 0, 0])
+        batch = {'image_idx': image_idx}
+        return image_idx, ray_bundle, batch
 
     def get_training_callbacks(  # pylint:disable=no-self-use
         self, training_callback_attributes: TrainingCallbackAttributes  # pylint: disable=unused-argument
