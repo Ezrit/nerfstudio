@@ -171,6 +171,8 @@ events.out.*
 # Data
 data
 !*/data
+dataset
+!*/dataset
 
 # Misc
 old/

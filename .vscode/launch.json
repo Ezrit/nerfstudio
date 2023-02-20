@@ -38,6 +38,17 @@
         "--logging.event-writer=wandb"
       ]
     },
+    {
+      "name": "Python: render dataset",
+      "type": "python",
+      "request": "launch",
+      "program": "scripts/render_dataset.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--load-config",
+        "outputs/data-nerfstudio-poster/nerfacto/2023-02-20_115403/config.yml"
+      ]
+    },
      {
       "name": "Python: nii-nerfstudio",
       "type": "python",
