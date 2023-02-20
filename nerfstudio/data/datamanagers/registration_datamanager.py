@@ -68,7 +68,7 @@ def covariance_matrix(eigenvectors: torch.Tensor, eigenvalues: torch.Tensor) -> 
     return covariance
 
 
-def get_multivariate_normal_3d(centers: torch.Tensor) -> torch.distributions.multivariate_normal.MultivariateNormal:
+def get_multivariate_normal_3d(centers: torch.Tensor, world_size: float = 1.0) -> torch.distributions.multivariate_normal.MultivariateNormal:
     """ 
     Computes a multivariate normal from 2 NeRF centers.
     The sampling should have the highes chance at the mean of the centers.
@@ -84,6 +84,14 @@ def get_multivariate_normal_3d(centers: torch.Tensor) -> torch.distributions.mul
 
     direction = centers[0, :] - centers[1, :]
     direction_length = torch.linalg.vector_norm(direction, ord=2)
+    if direction_length < 0.001:
+        # calculate starting deviation for x and z -> divide by 3 should enfore 99.9% to be within the given size (half world)
+        scatter_x_z = float(world_size) / 2.0 / 3.0
+        # starting deviation for y just fixed to 0.1, so we dont randomly sample from within the ground
+        scatter_y = 0.1
+        starting_covariance = torch.tensor([scatter_x_z, scatter_y, scatter_x_z], dtype=torch.float, device=centers.device)
+        return MultivariateNormal(mean, covariance_matrix=torch.diag(starting_covariance))
+
     direction_norm = direction / direction_length
 
     up_direction = torch.tensor([0, 0, 1], dtype=direction_norm.dtype, device=direction_norm.device)
@@ -114,6 +122,7 @@ class RegistrationDataManagerConfig(base_datamanager.VanillaDataManagerConfig):
     """Image size to sample from."""
     dataparser: NoDataParserConfig = NoDataParserConfig()
     """Specifies the dataparser used to unpack the data."""
+    camera_pos_mode: Literal["fixed", "update", "train"] = "fixed"
     # eval_num_rays_per_batch: None = None
     # eval_num_images_to_sample_from: None = None
     # eval_num_times_to_repeat_images: None = None
@@ -157,17 +166,18 @@ class RegistrationDataManager(base_datamanager.VanillaDataManager):  # pylint: d
 
     def update_ray_generator(self, nerf_centers: TensorType[2, 3], step: int) -> None:
         assert self.ray_generator is not None
+        if self.config.camera_pos_mode == "update":
+            self.position_sampler = get_multivariate_normal_3d(nerf_centers)
+
+        # generate new translations
+        new_translations = self.position_sampler.rsample(torch.Size((self.config.train_num_images_to_sample_from, )))
+        new_translations_reshaped = new_translations.reshape((-1, 3, 1)).to(self.device)
+
         # create new c2w matrizes without the translation for now
         # rotation should not be needed as we use equirectangular cameras atm
         # new_camera_to_worlds = torch.eye(3, dtype=torch.float, device=self.device).reshape((1, 3, 3))
         new_camera_to_worlds = torch.index_select(torch.eye(3, dtype=torch.float, device=self.device), 1, torch.tensor([0, 2, 1], device=self.device)).reshape((1, 3, 3))
         new_camera_to_worlds = new_camera_to_worlds.repeat(self.config.train_num_images_to_sample_from, 1, 1)
-
-        # generate new translations
-        self.position_sampler = get_multivariate_normal_3d(nerf_centers)
-        new_translations = self.position_sampler.rsample(torch.Size((self.config.train_num_images_to_sample_from, )))
-        new_translations_reshaped = new_translations.reshape((-1, 3, 1)).to(self.device)
-
         # stack the translations (NOT! negative cause its camera -> world, not the other way)
         new_camera_to_worlds = torch.cat((new_camera_to_worlds, new_translations_reshaped), dim=2)
 
@@ -183,13 +193,14 @@ class RegistrationDataManager(base_datamanager.VanillaDataManager):  # pylint: d
         Here you will define any subclass specific object attributes from the attribute"""
 
         # setup the position sampler, start with no correlation between the axes (diag matrix as covariance matrix)
-        starting_mean = torch.tensor([0, 0, 0], dtype=torch.float, device=self.device)
+        self.sampler_mean = torch.nn.Parameter(torch.tensor([0, 0, 0], dtype=torch.float, device=self.device, requires_grad=(self.config.camera_pos_mode == "train")))
         # calculate starting deviation for x and z -> divide by 3 should enfore 99.9% to be within the given size (half world)
-        scatter_x_z = float(self.world_size) / 2.0 / 3.0
+        scatter_x_y = float(self.world_size) / 2.0 / 3.0
+        scatter_z = float(self.world_size) / 2.0 / 30.0
+        self.scale_tril = torch.nn.Parameter(torch.diag(torch.tensor([scatter_x_y, scatter_x_y, scatter_z], dtype=torch.float, device=self.device)))
+        self.scale_tril.requires_grad_(self.config.camera_pos_mode=="train")
         # starting deviation for y just fixed to 0.1, so we dont randomly sample from within the ground
-        scatter_y = 0.1
-        starting_covariance = torch.tensor([scatter_x_z, scatter_y, scatter_x_z], dtype=torch.float, device=self.device)
-        self.position_sampler = MultivariateNormal(starting_mean, covariance_matrix=torch.diag(starting_covariance))
+        self.position_sampler = MultivariateNormal(self.sampler_mean, scale_tril=self.scale_tril)
 
         # setup initial ray_generator
         # create c2w matrizes without the translation for now
@@ -243,6 +254,10 @@ class RegistrationDataManager(base_datamanager.VanillaDataManager):  # pylint: d
 
         This will be a tuple of all the information that this data manager outputs.
         """
+        if self.config.camera_pos_mode == "train":
+            self.position_sampler = MultivariateNormal(self.sampler_mean, scale_tril=self.scale_tril)
+            # print(self.sampler_mean)
+            # print(self.scale_tril)
         assert self.position_sampler is not None, "position sample is not initialized!"
 
         # image_batch = {}

@@ -47,13 +47,16 @@ class PolarWeightedLoss(_Loss):
         assert(self.reduction == 'none')
         return unreduced_loss
 
+def weighted_mse_loss(input, target, weight):
+    return (weight * (input - target) ** 2).mean()
 
 L1Loss = nn.L1Loss
 MSELoss = nn.MSELoss
 PolarLoss = PolarWeightedLoss
+Weighted_MSELoss = weighted_mse_loss
 
 
-LOSSES = {"L1": L1Loss, "MSE": MSELoss, 'Polar': PolarWeightedLoss}
+LOSSES = {"L1": L1Loss, "MSE": MSELoss, 'Polar': PolarWeightedLoss, "WMSE": Weighted_MSELoss}
 
 EPS = 1.0e-7
 

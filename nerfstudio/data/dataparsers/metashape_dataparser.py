@@ -22,13 +22,14 @@ from cmath import pi
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import List, Literal, Type
+from typing import List, Literal, Optional, Tuple, Type
 
 import numpy as np
 import torch
 from PIL import Image
 from pyquaternion import Quaternion
 from rich.console import Console
+from torchtyping import TensorType
 
 from nerfstudio.cameras import camera_utils
 from nerfstudio.cameras.cameras import Cameras, CameraType
@@ -61,6 +62,28 @@ CAMERA_MODEL_TO_TYPE = {
 }
 
 
+def quaternion_to_rotation_matrix(quaternion: TensorType[4]) -> TensorType[3, 3]:
+    # Normalize and unpack the quaternion
+    qw, qx, qy, qz = quaternion / torch.norm(quaternion)
+
+    # Compute the rotation matrix
+    matrix = torch.zeros((3, 3), device=quaternion.device)
+
+    matrix[0, 0] = 1. - 2. * qy ** 2 - 2. * qz ** 2
+    matrix[1, 1] = 1. - 2. * qx ** 2 - 2. * qz ** 2
+    matrix[2, 2] = 1. - 2. * qx ** 2 - 2. * qy ** 2
+
+    matrix[0, 1] = 2. * qx * qy - 2. * qz * qw
+    matrix[1, 0] = 2. * qx * qy + 2. * qz * qw
+
+    matrix[0, 2] = 2. * qx * qz + 2 * qy * qw
+    matrix[2, 0] = 2. * qx * qz - 2 * qy * qw
+
+    matrix[1, 2] = 2. * qy * qz - 2. * qx * qw
+    matrix[2, 1] = 2. * qy * qz + 2. * qx * qw
+    return matrix
+
+
 @dataclass
 class MetashapeDataParserConfig(DataParserConfig):
     """Metashape dataset config"""
@@ -83,6 +106,9 @@ class MetashapeDataParserConfig(DataParserConfig):
     """Threshold for alpha masking. Alpha values below this will be masked completely (No rays cast)."""
     max_images: int = 200
     """Number of images to be used for training. Will randomly draw from all images available at the start. (it breaks with too many)"""
+    fixed_translation: Optional[Tuple[float, float, float]] = None
+    fixed_rotation: Optional[Tuple[float, float, float, float]] = None
+    fixed_scaling: Optional[float] = None
 
 
 @dataclass
@@ -106,7 +132,9 @@ class Metashape(DataParser):
         tree = ET.parse(self.config.data / 'cameras.xml')
         root = tree.getroot()
         chunk = root.find('chunk')
+        assert chunk is not None, "chunk not found"
         cameras = chunk.find('cameras')
+        assert cameras is not None, "cameras not found"
 
         groups_exist = (cameras.find('group') is not None)
         if groups_exist:
@@ -151,15 +179,30 @@ class Metashape(DataParser):
             # poses = [poses[i] for i in sampled_indices] this needs to be done after auto_orient_poses, so the final world coordinate system doesnt change every time
             
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
-        poses, self.transform = camera_utils.auto_orient_and_center_poses(poses, method=self.config.orientation_method)
-        self.transform = torch.cat((self.transform, torch.tensor([[0, 0, 0, 1]])), 0)
+
+        self.fixed_poses = self.config.fixed_rotation is not None and self.config.fixed_scaling is not None and self.config.fixed_translation is not None
+
+        self.transform: TensorType[4, 4] = torch.eye(4)
+        if self.fixed_poses:
+            self.transform[:3, :3] = torch.index_select(quaternion_to_rotation_matrix(torch.tensor(self.config.fixed_rotation)), 1, torch.tensor([0, 2, 1]))
+            assert self.config.fixed_translation is not None
+            # TODO: think about whether or not to apply the rotation...
+            self.transform[:3, 3] = self.transform[:3, :3] @ torch.tensor(self.config.fixed_translation)
+            poses = self.transform @ poses
+        else:
+            poses, self.transform[:3, :4] = camera_utils.auto_orient_and_center_poses(poses, method=self.config.orientation_method)
         poses = poses[sampled_indices, ...]
 
         # Scale poses
-        scale_factor = 1.0 / torch.max(torch.abs(poses[:, :3, 3]))
-        poses[:, :3, 3] *= scale_factor * self.config.scale_factor
+        scale_factor = 1.0
+        if self.fixed_poses:
+            poses[:, :3, 3] *= self.config.fixed_scaling
+            combined_scale_factor = self.config.fixed_scaling
+        else:
+            scale_factor = 1.0 / torch.max(torch.abs(poses[:, :3, 3]))
+            poses[:, :3, 3] *= scale_factor * self.config.scale_factor
+            combined_scale_factor = scale_factor * self.config.scale_factor
 
-        combined_scale_factor = scale_factor * self.config.scale_factor
         self.transform = torch.diag(torch.tensor([combined_scale_factor, combined_scale_factor, combined_scale_factor, 1], device=self.transform.device)) @ self.transform
 
         # in x,y,z order

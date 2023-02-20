@@ -29,7 +29,7 @@ from nerfstudio.engine.callbacks import (
 )
 
 # from nerfstudio.engine.trainer import TrainerConfig
-from nerfstudio.model_components.losses import MSELoss
+from nerfstudio.model_components.losses import MSELoss, Weighted_MSELoss
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.pipelines.base_pipeline import Pipeline
 from nerfstudio.utils import colormaps
@@ -133,6 +133,9 @@ class NerfRegistrationConfig(ModelConfig):
     """fake scaling to test to train"""
     fake_rotation: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
     """fake rotation to test to train"""
+    train_translation: bool = True
+    train_scaling: bool = True
+    train_rotation: bool = True
 
 
 class NerfRegistrationModel(Model):
@@ -272,11 +275,11 @@ class NerfRegistrationModel(Model):
 
         # safe parameters to be optimized
         self.translate = torch.nn.Parameter(torch.zeros(3))
-        self.translate.requires_grad_(True)
+        self.translate.requires_grad_(self.config.train_translation)
         self.rotation = torch.nn.Parameter(torch.tensor([1.0, 0.0, 0.0, 0.0]))
-        self.rotation.requires_grad_(True)
+        self.rotation.requires_grad_(self.config.train_rotation)
         self.scale = torch.nn.Parameter(torch.ones(3))
-        self.scale.requires_grad_(True)
+        self.scale.requires_grad_(self.config.train_scaling)
 
         self.fake_translation = torch.nn.Parameter(torch.tensor(self.config.fake_translation))
         self.fake_scaling = torch.nn.Parameter(torch.tensor(self.config.fake_scaling))
@@ -292,6 +295,7 @@ class NerfRegistrationModel(Model):
 
         # losses
         self.rgb_loss = MSELoss()
+        self.wrgb_loss = Weighted_MSELoss
 
         self.last_ray_origins: Optional[TensorType[..., 3]] = None
         self.last_ray_directions: Optional[TensorType[..., 3]] = None
@@ -305,7 +309,8 @@ class NerfRegistrationModel(Model):
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = {}
         # TODO: still a bit confused by this...
-        param_groups["transform"] = [self.translate, self.rotation, self.scale]
+        if self.config.train_rotation or self.config.train_scaling or self.config.train_translation:
+            param_groups["transform"] = [self.translate, self.rotation, self.scale]
         return param_groups
 
     def get_outputs(self, ray_bundle: RayBundle):
@@ -362,6 +367,7 @@ class NerfRegistrationModel(Model):
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
         loss_dict = {}
         loss_dict["rgb_loss"] = self.rgb_loss(outputs["main_rgb"], outputs["sub_rgb"])
+        # loss_dict["depth_loss"] = self.rgb_loss(outputs["main_depth"], outputs["sub_depth"])
 
         return loss_dict
 
