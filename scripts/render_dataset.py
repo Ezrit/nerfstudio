@@ -4,6 +4,7 @@ render.py
 """
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,15 @@ def _render_dataset_images(
         TimeRemainingColumn(elapsed_when_finished=True, compact=True),
     )
     cameras = cameras.to(pipeline.device)
+    transforms_dict = {
+        "fl_x": cameras.fx[0, 0].item(),
+        "fl_y": cameras.fy[0, 0].item(),
+        "cx": cameras.cx[0, 0].item(),
+        "cy": cameras.cy[0, 0].item(),
+        "w": cameras.width[0, 0].item(),
+        "h": cameras.height[0, 0].item(),
+    }
+    frames_list: List[dict] = []
     with progress:
         for camera_idx in progress.track(range(number_images), description=""):
             camera_ray_bundle = cameras.generate_rays(camera_indices=camera_idx)
@@ -68,7 +78,22 @@ def _render_dataset_images(
                     output_image = np.concatenate((output_image,) * 3, axis=-1)
                 render_image.append(output_image)
             render_image = np.concatenate(render_image, axis=1)
-            media.write_image(output_image_dir / f"{camera_idx:05d}.png", render_image)
+            output_file = output_image_dir / f"{camera_idx:05d}.png"
+            media.write_image(output_file, render_image)
+            image_transform_matrix = torch.eye(4)
+            image_transform_matrix[:3, :4] = cameras.camera_to_worlds[camera_idx, :3, :4]
+            frame_dict = {
+                "file_path": output_file.name, 
+                "transform_matrix": image_transform_matrix.tolist(),
+            }
+            frames_list.append(frame_dict)
+
+    transforms_dict["frames"] = frames_list
+    json_object = json.dumps(transforms_dict, indent=4)
+    json_file = output_image_dir / 'transforms.json'
+    with open(json_file.as_posix(), 'w') as f:
+        f.write(json_object)
+    
 
 
 @dataclass
@@ -86,7 +111,7 @@ class RenderDataset:
     # number of images in the dataset
     number_images: int = 1000
     # resolution of images
-    resolution: Tuple[int, int] = (200, 200)
+    resolution: Tuple[int, int] = (256, 256)
     # Specifies number of rays per chunk during eval.
     eval_num_rays_per_chunk: Optional[int] = None
 
@@ -123,6 +148,7 @@ class RenderDataset:
         fl_y: float = 110.0
         cameras: Cameras = Cameras(camera_to_worlds=c2whs[:, :3, :4], fx=fl_x, fy=fl_y, cx=self.resolution[1]/2.0, cy=self.resolution[0]/2.0, width=self.resolution[1], height=self.resolution[0])
         combined_output_path: Path = self.dataset_path / self.output_path
+        combined_output_path.mkdir(parents=True)
         _render_dataset_images(pipeline=pipeline, cameras=cameras, rendered_output_names=self.rendered_output_names, output_image_dir=combined_output_path, number_images=self.number_images)
 
 
